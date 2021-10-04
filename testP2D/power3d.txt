@@ -1,0 +1,1 @@
+<class 'hsc3x2pt.power_b1_class'>
