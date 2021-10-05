@@ -19,7 +19,8 @@ from twobessel import two_Bessel
 from twobessel import log_extrap
 from astropy import constants
 
-H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
+#H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
+H0 = 1e5 / constants.c.value # /(Mpc/h)
 
 #######################################
 #
@@ -39,7 +40,7 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         h = ((c[0][0]+c[0][1]+omn)/(1-c[0][2]))**0.5
         c = {'Omega_de0': cosmo_dict['Omega_de'], 'Omega_K0': 0.0, 'w0': cosmo_dict['w_de'], 'wa': 0.0, 'h': h}
         self.halofit.set_cosmology(c)
-        cosmo_dict.update({'h':h})
+        cosmo_dict.update(c)
         self.cosmo_dict = cosmo_dict
     
     def get_cosmo_dict(self):
@@ -50,9 +51,9 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         _Dp = np.array([self.Dgrowth_from_z(__z) for __z in _z])
         return ius(_z, _Dp, ext=1)(z)
     
-    def init_pklin(self, zmax, kmax=2.0):
-        logk = np.linspace(-4, np.log10(kmax), 200)
-        z = np.linspace(0.0, zmax, 100)
+    def init_pklin(self, zmax, kmax=1e3, kbin=300, zbin=100):
+        logk = np.linspace(-4, np.log10(kmax), kbin)
+        z = np.linspace(0.0, zmax, zbin)
         pkL= self.get_pklin(10**logk)
         Dp = self.get_Dgrowth(z)
         self.pk_data = {'logk':logk, 'z':z, 'pkL':pkL, 'Dp':Dp}
@@ -86,42 +87,51 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         _chi = self.get_chi_from_z(_z)
         return ius(_chi, _z)(chi)
     
-    def get_pklin_lchi(self, l, chi):
+    def get_pklin_lchi(self, l, chi, N_low=100, N_high=100):
         """
         return pk(k=l/chi, z=z(chi))
         """
         z = self.get_z_from_chi(chi)
         Dp = ius(self.pk_data['z'], self.pk_data['Dp'], ext=1)(z)
-        pkL= 10**ius(self.pk_data['logk'], np.log10(self.pk_data['pkL']), ext=1)( np.log10(l/chi) )
+        logk_extrap   = log_extrap(self.pk_data['logk'], N_low, N_high)
+        logpkL_extrap = np.log10(log_extrap(self.pk_data['pkL'], N_low, N_high))
+        pkL= 10**ius(logk_extrap, logpkL_extrap, ext=1)( np.log10(l/chi) )
         return Dp**2*pkL
     
-    def get_pkhalo_lchi(self, l, chi):
+    def get_pkhalo_lchi(self, l, chi, N_low=100, N_high=100):
         z = self.get_z_from_chi(chi)
         logk = np.log10(l/chi)
-        f = interp2d(self.pk_data['logk'], self.pk_data['z'], np.log10(self.pk_data['pkhalo']), 
+        logk_extrap = log_extrap(self.pk_data['logk'], N_low, N_high)
+        pkhalo_extrap = [log_extrap(self.pk_data['pkhalo'][i, :], N_low, N_high) 
+                         for i in range(len(self.pk_data['z']))]
+        logpkhalo_extrap = np.log10(pkhalo_extrap)
+        f = interp2d(logk_extrap, self.pk_data['z'], logpkhalo_extrap, 
                      bounds_error=False, fill_value=-300)
         ans = []
         for _logk, _z in zip(logk, z):
             ans.append(10**f(_logk, _z))
-        return np.array(ans)
+        return np.array(ans).reshape(chi.shape)
     
     def get_pklingm_lchi(self, l, chi, b1):
         return b1*self.get_pklin_lchi(l, chi)
     
-    def get_pklingg_lchi(self, l, chi, b1):
-        return b1**2*self.get_pklin_lchi(l, chi)
+    def get_pklingg_lchi(self, l, chi, b1_1, b1_2):
+        return b1_1*b1_2*self.get_pklin_lchi(l, chi)
     
     def get_pkhalogm_lchi(self, l, chi, b1):
         return b1*self.get_pkhalo_lchi(l, chi)
     
-    def get_pkhalogg_lchi(self, l, chi, b1):
-        return b1**2*self.get_pkhalo_lchi(l, chi)
+    def get_pkhalogg_lchi(self, l, chi, b1_1, b1_2):
+        return b1_1*b1_2*self.get_pkhalo_lchi(l, chi)
     
-    def get_pk_lchi(self, l, chi, b1, model):
+    def get_pk_lchi(self, l, chi, model):
         if model == 'lin':
-            return self.get_pklin_lchi(l, chi, b1)
+            return self.get_pklin_lchi(l, chi)
         elif model  == 'nonlin':
-            return self.get_pkhalo_lchi(l, chi,  b1)
+            return self.get_pkhalo_lchi(l, chi)
+        
+    def get_pkmm_lchi(self, l, chi, model):
+        return self.get_pk_lchi(l, chi, model)
     
     def get_pkgm_lchi(self, l, chi, b1, model):
         if model == 'lin':
@@ -129,18 +139,77 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         elif model  == 'nonlin':
             return self.get_pkhalogm_lchi(l, chi, b1)
         
-    def get_pkgg_lchi(self, l, chi, b1, model):
+    def get_pkgg_lchi(self, l, chi, b1_1, b1_2, model):
         if model == 'lin':
-            return self.get_pklingg_lchi(l, chi, b1)
+            return self.get_pklingg_lchi(l, chi, b1_1, b1_2)
         elif model  == 'nonlin':
-            return self.get_pkhalogg_lchi(l, chi,  b1)
-        
+            return self.get_pkhalogg_lchi(l, chi,  b1_1, b1_2)
+
+
+#######################################
+#
+# windows
+#
+def window_lensing(chi, z, z_source, cosmo_dict, z2chi):
+    ans = np.zeros(chi.shape)
+    chi_source = z2chi(z_source)
+    sel = chi < chi_source
+    Omega_m = 1.0 - cosmo_dict['Omega_de']
+    ans[sel] = 3.0/2.0 * H0**2 * Omega_m / (1+z[sel]) * chi[sel]*(chi_source-chi[sel])/chi_source
+    return ans
+
+def window_lensing_chirange(z_source, z2chi, r=0.01):
+    chi_source = z2chi(z_source)
+    return np.array([r*chi_source, (1-r)*chi_source])
+
+def window_tophat(chi, z, zmin, zmax, z2chi):
+    chi_max, chi_min = z2chi(zmax), z2chi(zmin)
+    ans = np.zeros(chi.shape)
+    sel = np.logical_and(chi_min<chi, chi<chi_max)
+    dchi = chi_max-chi_min
+    ans[sel] = 1/dchi
+    return ans
+
+def window_tophat_chirange(zmin, zmax, z2chi):
+    chi_max, chi_min = z2chi(zmax), z2chi(zmin)
+    return np.array([chi_min, chi_max])
+
+###########################################
+#
+# making chi array for a given window pair
+#
+def get_chirange_overlap(chirange1, chirange2):
+    if chirange1.max() <= chirange2.min():
+        # no overlap
+        return np.array([0.0, 0.0])
+    elif chirange2.max() <= chirange1.min():
+        # no overlap
+        return np.array([0.0, 0.0])
+    else:
+        chi_min, chi_max = max([chirange1.min(), chirange2.min()]), min([chirange1.max(), chirange2.max()])
+        return np.array([chi_min, chi_max])
+    
+def get_chi_overlap(chirange1, chirange2, chi_bin):
+    cr = get_chirange_overlap(chirange1, chirange2)
+    return np.linspace(cr[0], cr[1], chi_bin)
+
+def get_chi_lensing(chirange1, chirange2, chi_bin, chi_min_max):
+    cr = get_chirange_overlap(chirange1, chirange2)
+    if chi_min_max > cr[0]:
+        #print('lin scale is enough for lensing kernel.')
+        chi = np.linspace(cr[0], cr[1], chi_bin)
+    else:
+        #print('log scale for lensing kernel.')
+        chi = np.logspace(np.log10(chi_min_max), np.log10(cr[1]), chi_bin)
+    return chi
+
 #######################################
 #
 # galaxy sample classes
 #
-class galaxy_sample_source_class:
-    info_keys = ['sample_name', 'z_source', 'sigma_shape', 'n2d']
+class galaxy_base_class:
+    info_keys = []
+    sample_type = ''
     def __init__(self, info):
         self.set_galaxy_info(info)
         self.halofit = pyhalofit.halofit()
@@ -156,85 +225,69 @@ class galaxy_sample_source_class:
     
     def _set_galaxy_info_from_dict(self, info):
         self.info = info
-        self.info['sample_type'] = 'source'
     
     def get_sample_info(self):
         return self.info
     
     def set_cosmology_from_dict(self, cosmo_dict):
         self.halofit.set_cosmology(cosmo_dict)
-        self.Omega_m = 1.0 - cosmo_dict['Omega_de']
-        z_source = self.info['z_source']
-        self.chi_source = self.halofit.cosmo.comoving_distance(z_source).value * self.cosmo_dict['h']
-    
-    def window(self, chi, z):
-        ans = np.zeros(chi.shape)
-        sel = chi < self.chi_source
-        ans[sel] = 3.0/2.0 * H0**2 * self.Omega_m / (1+z[sel]) * chi[sel]*(self.chi_source-chi[sel])/self.chi_source
-        return ans
-    
-    def get_chi_range(self, r=0.01):
-        return [self.chi_source*r, self.chi_source*(1-r)]
-
-class galaxy_sample_lens_class:
-    info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
-    def __init__(self, info):
-        """
-        z_lens : representative comoving distance to this lens galaxy sample.
-        z_min : minimum comoving distance of this galaxy sample
-        z_max : maximum comoving distance of this galaxy sample
-        galaxy_bias : b1
-        n2d : mean nubmer density used to compute shot noise term. #/deg^2
-        """
-        self.set_galaxy_info(info)
+        self.cosmo_dict = cosmo_dict
         
-    def set_galaxy_info(self, info):
-        if isinstance(info, dict):
-            self._set_galaxy_info_from_dict(info)
-        elif isinstance(info, list):
-            self._set_galaxy_info_from_list(info)
+    def z2chi(self, z):
+        return self.halofit.cosmo.comoving_distance(z).value * self.cosmo_dict['h']
     
-    def _set_galaxy_info_from_list(self, info_list):
-        self._set_galaxy_info_from_dict(od(zip(self.info_keys, info_list)))
+    def chi2z(self, chi):
+        _z = np.linspace(0.0, 10.0, 100)
+        _chi = self.z2chi(_z)
+        return ius(_chi, _z)(chi)
+
+class galaxy_sample_source_class(galaxy_base_class):
+    info_keys = ['sample_name', 'z_source', 'sigma_shape', 'n2d']
+    sample_type = 'source'
+    def __init__(self, info):
+        super().__init__(info)
     
-    def _set_galaxy_info_from_dict(self, info):
-        self.info = info
-        self.info['sample_type'] = 'lens'
+    def window_lensing(self, chi, z):
+        return window_lensing(chi, z, self.info['z_source'], self.cosmo_dict, self.z2chi)
     
-    def get_sample_info(self):
-        return self.info
-    
+    def window_lensing_chirange(self):
+        return window_lensing_chirange(self.info['z_source'], self.z2chi)
+
+class galaxy_sample_lens_class(galaxy_base_class):
+    info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
+    sample_type = 'lens'
+    def __init__(self, info):
+        super().__init__(info)
+        
     def set_cosmology_from_dict(self, cosmo_dict):
-        self.halofit.set_cosmology(cosmo_dict)
-        self.Omega_m = 1.0 - cosmo_dict['Omega_de']
-        self.chi_lens = self.halofit.cosmo.comoving_distance(self.info['z_lens']).value * self.cosmo_dict['h']
-        self.chi_min = self.halofit.cosmo.comoving_distance(self.info['z_min']).value * self.cosmo_dict['h']
-        self.chi_max = self.halofit.cosmo.comoving_distance(self.info['z_max']).value * self.cosmo_dict['h']
+        super().set_cosmology_from_dict(cosmo_dict)
+        # chi_lens
+        # 
+        # \int{\rm d}z_l P(z_l) \chi (\chi_l-\chi)/\chi_l = \chi (<\chi_l^{-1}>^{-1} - \chi) / <\chi_l^{-1}>^{-1}
+        #
+        # where <\chi_l^{-1}> = \int{\rm d}z_l P(z_l) \chi_l^{-1}.
+        #
+        # We define z_lens_eff as 
+        #
+        #  \chi(z_lens_eff) = <\chi_l^{-1}>^{-1}
+        # 
+        # We assume P(z_l) = {\rm const} for simplicity.
+        z = np.linspace(self.info['z_min'], self.info['z_max'], 100)
+        chi = self.z2chi(z)
+        chi_lens_inv_ave = simps(1/chi, z)/(self.info['z_max']-self.info['z_min']) # = <\chi_l^{-1}>
+        self.z_lens_eff = self.chi2z(chi_lens_inv_ave**-1)
     
     def window_galaxy(self, chi, z):
-        ans = np.zeros(chi.shape)
-        sel = np.logical_and(self.chi_min < chi, chi < self.chi_max)
-        ans[sel] = 1
-        return ans
+        return window_tophat(chi, z, self.info['z_min'], self.info['z_max'], self.z2chi)
     
-    def window_galaxy_normalized(self, chi, z):
-        return self.window_galaxy(chi, z)/(self.chi_max - self.chi_min)
+    def window_galaxy_chirange(self):
+        return window_tophat_chirange(self.info['z_min'], self.info['z_max'], self.z2chi)
     
-    def window(self, chi, z):
-        return self.window_galaxy_normalized(chi, z)
+    def window_magnification(self, chi, z):
+        return window_lensing(chi, z, self.z_lens_eff, self.cosmo_dict, self.z2chi)
     
-    def window_mag(self, chi, z):
-        ans = np.zeros(chi.shape)
-        sel = chi < self.chi_lens
-        ans[sel] = 3.0/2.0 * H0**2 * self.Omega_m / (1+z[sel]) * chi[sel]*(self.chi_lens-chi[sel])/self.chi_lens
-        return ans
-    
-    def get_chi_range(self, r=0.01):
-        """
-        chi range used to compute convolution with power spectrum to obtain 2d power spectrum, C(l).
-        Note that even for lens galaxy sample, chi range is from 0 to chi_lens, because magnification bias effect is included.
-        """
-        return [self.chi_lens*r, self.chi_lens*(1-r)]
+    def window_magnification_chirange(self):
+        return window_lensing_chirange(self.z_lens_eff, self.z2chi)
 
 #######################################
 #
@@ -262,8 +315,8 @@ class pk2cl_class:
         
     def set_cosmology_from_dict(self, cosmo_dict=None):
         if cosmo_dict is not None:
-            self.power3d.set_cosmology_from_dict(cosmo_dict)
-        cosmo_dict = self.power3d.get_cosmo_dict()
+            self.pk_class.set_cosmology_from_dict(cosmo_dict)
+        cosmo_dict = self.pk_class.get_cosmo_dict()
         for key in self.galaxy_sample_dict.keys():
             self.galaxy_sample_dict[key].set_cosmology_from_dict(cosmo_dict)
         self.cosmo_dict = cosmo_dict
@@ -271,9 +324,9 @@ class pk2cl_class:
     def get_zmax_from_galaxy_samples(self):
         zmax = 0
         for key, sample in self.galaxy_sample_dict.items():
-            if sample.info['sample_type'] == 'source':
+            if sample.sample_type == 'source':
                 _zmax = sample.info['z_source']
-            elif sample.info['sample_type'] == 'lens':
+            elif sample.sample_type == 'lens':
                 _zmax = sample.info['z_lens']
             if _zmax > zmax:
                 zmax = _zmax
@@ -283,6 +336,111 @@ class pk2cl_class:
         zmax = self.get_zmax_from_galaxy_samples()
         self.pk_class.init_pklin(zmax)
         self.pk_class.init_pkhalo()
+        self.k_peak = 10**self.pk_class.pk_data['logk'][np.argmax(self.pk_class.pk_data['pkL'])]
+        
+    def _Cgg(self, name1, name2, l, model='nonlin', chi_bin=100, plot=False, plot_xlog=False):
+        ans = 0
+        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+        b1_1, b1_2 = sample1.info['galaxy_bias'], sample2.info['galaxy_bias']
+        alpha_mag1, alpha_mag2 = sample1.info['alpha_mag'], sample2.info['alpha_mag']
+        # g g
+        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_galaxy_chirange(), chi_bin)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkgg_lchi(l, chi, b1_1, b1_2, model)
+        w1, w2 = sample1.window_galaxy(chi, z), sample2.window_galaxy(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi)
+        if plot:
+            plt.figure()
+            plt.xlabel(r'$\chi$')
+            plt.yscale('log')
+            plt.xscale('log') if plot_xlog else None
+            plt.plot(chi, w1*w2*plchi/chi**2)
+        # g mag
+        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_magnification_chirange(), chi_bin)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_1, model)
+        w1, w2 = sample1.window_galaxy(chi, z), sample2.window_magnification(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag2-1)
+        if plot:
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag2-1))
+        # mag g
+        chi = get_chi_overlap( sample1.window_magnification_chirange(), sample2.window_galaxy_chirange(), chi_bin)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_2, model)
+        w1, w2 = sample1.window_magnification(chi, z), sample2.window_galaxy(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1)
+        if plot:
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1))
+        # mag mag
+        chi = get_chi_lensing( sample1.window_magnification_chirange(), sample2.window_magnification_chirange(), chi_bin, l/self.k_peak/100.0)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+        w1, w2 = sample1.window_magnification(chi, z), sample2.window_magnification(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1) * 2*(alpha_mag2-1)
+        if plot:
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1) * 2*(alpha_mag2-1))
+        return ans
+
+    def _CgE(self, name1, name2, l, model='nonlin', chi_bin=100,plot=False, plot_xlog=False):
+        ans = 0
+        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+        if sample1.sample_type == 'lens' and sample2.sample_type == 'source':
+            sample_l, sample_s = sample1, sample2
+        elif sample1.sample_type == 'source' and sample2.sample_type == 'lens':
+            sample_l, sample_s = sample2, sample1
+        b1, alpha = sample_l.info['galaxy_bias'], sample_l.info['alpha_mag']
+        # g E
+        chi = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), chi_bin)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1, model)
+        w1, w2 = sample_l.window_galaxy(chi, z), sample_s.window_lensing(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi)
+        if plot:
+            plt.figure()
+            plt.yscale('log')
+            plt.xscale('log') if plot_xlog else None
+            plt.plot(chi, w1*w2*plchi/chi**2)
+        # mag E
+        chi = get_chi_lensing( sample_l.window_magnification_chirange(), sample_s.window_lensing_chirange(), chi_bin, l/self.k_peak/100.0)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+        w1, w2 = sample_l.window_magnification(chi, z), sample_s.window_lensing(chi, z)
+        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha-1)
+        if plot:
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha-1))
+        return ans
+    
+    def _CEE(self, name1, name2, l, model='nonlin', chi_bin=100, plot=False, plot_xlog=False):
+        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+        # EE
+        chi = get_chi_lensing( sample1.window_lensing_chirange(), sample2.window_lensing_chirange(), chi_bin, l/self.k_peak/100.0)
+        z = self.pk_class.get_z_from_chi(chi)
+        plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+        w1, w2 = sample1.window_lensing(chi, z), sample2.window_lensing(chi, z)
+        ans = simps(w1*w2*plchi/chi**2, chi)
+        if plot:
+            plt.figure()
+            plt.yscale('log')
+            plt.xscale('log') if plot_xlog else None
+            plt.plot(chi, w1*w2*plchi/chi**2)
+        return ans
+    
+    def Cgg(self, name1, name2, l, model='nonlin', chi_bin=100):
+        return np.array([ self._Cgg(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
+    
+    def CgE(self, name1, name2, l, model='nonlin', chi_bin=100):
+        return np.array([ self._CgE(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
+    
+    def CEE(self, name1, name2, l, model='nonlin', chi_bin=100):
+        return np.array([ self._CEE(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
+        
+    def 
+        
+        
+        
+        
+        
+        
         
     def _get_chi_from_2samples(self, sample1, sample2, chi_bin=100):
         chi_min1, chi_max1 = sample1.get_chi_range()
