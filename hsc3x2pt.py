@@ -2,15 +2,20 @@ import numpy as np
 try:
     from dark_emulator_public import dark_emulator
 except:
-    import dark_emulator
+    try:
+        import dark_emulator
+    except:
+        print('dark emulator is not installed.')
+        print('See https://dark-emulator.readthedocs.io/en/latest/')
 print('using dark_emulator at ', dark_emulator.__file__)
-import os, sys, json
+import os, sys, json, copy
 import matplotlib.pyplot as plt
 from collections import OrderedDict as od
 try:
     from pyhalofit import pyhalofit
 except:
-    print('pyhalofit is not installed. Clone https://github.com/git-sunao/pyhalofit.')
+    print('pyhalofit is not installed.')
+    print('Clone https://github.com/git-sunao/pyhalofit.')
 from scipy.interpolate import InterpolatedUnivariateSpline as ius
 from scipy.interpolate import interp2d, interp1d
 from time import time
@@ -24,6 +29,10 @@ from astropy import constants
 #H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
 H0 = 1e5 / constants.c.value # /(Mpc/h)
 
+#################################################
+#
+# Utils
+#
 class Silent:
     def __init__(self, silent=True):
         self.silent = silent
@@ -57,12 +66,50 @@ class Time:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.echo:
-            print(f'{self.message}:{time()-self.t_start}')
+            print(f'{self.message}:{time()-self.t_start} sec')
 
 def loginterp1d(x, y, xin):
     return 10**interp1d(np.log10(x), np.log10(y),
                         bounds_error=False, 
                         fill_value='extrapolate')(np.log10(xin))
+
+def J0_binave(k, rmin, rmax):
+    def i(kr):
+        return kr*jn(1,kr)
+    krmin, krmax = k*rmin, k*rmax
+    norm = (krmax**2-krmin**2)/2.0
+    ans = np.ones(k.shape)
+    sel = k > 0
+    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
+    return ans
+
+def J2_binave(k, rmin, rmax):
+    def i(kr):
+        return -2*jn(0,kr) - kr*jn(1,kr)
+    krmin, krmax = k*rmin, k*rmax
+    norm = (krmax**2-krmin**2)/2.0
+    ans = np.zeros(k.shape)
+    sel = k > 0
+    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
+    return ans
+
+def J4_binave(k, rmin, rmax):
+    def i(kr):
+        return (-8/kr+kr**2)*jn(1,kr) - 8*jn(2, kr)
+    krmin, krmax = k*rmin, k*rmax
+    norm = (krmax**2-krmin**2)/2.0
+    ans = np.zeros(k.shape)
+    sel = k > 0
+    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
+    return ans
+
+def jn_binave(mu, k, rmin, rmax):
+    if mu == 0.0:
+        return J0_binave(k, rmin, rmax)
+    elif mu == 2.0:
+        return J2_binave(k, rmin, rmax)
+    elif mu == 4.0:
+        return J4_binave(k, rmin, rmax)
 
 #######################################
 #
@@ -675,22 +722,24 @@ class pk2cl_class:
             self.Cl_cache['Cl'][key] = np.loadtxt(os.path.join(dirname, fname))
         # galaxy samples
         
-    def angular_correlation_function_fftlog(self, name1, name2, theta, probe, plot=False):
+    def angular_correlation_function_fftlog(self, name1, name2, theta, probe, binave=False, dlnt=None, plot=False, plot_with=None):
         l = self.Cl_cache['Cl']['l']
-        Cl = self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ]
-        
-        logtmin, logtmax = np.log10(theta.min())-2, np.log10(theta.max())+2
-        print(logtmin, logtmax)
-        fftlog = dark_emulator.pyfftlog_interface.fftlog(logrmin=logtmin, logrmax=logtmax, num=8)
-        mu = self.probe_mu_dict[probe]
-        input_Cl = loginterp1d(l, Cl, fftlog.k)*fftlog.k
-        
+        Cl = copy.deepcopy(self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ])
         # more factors
         if probe == 'wp':
             Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
-            input_Cl *= Delta_chi_g
+            Cl *= Delta_chi_g
+        
+        logtmin, logtmax = np.log10(theta.min())-2, np.log10(theta.max())+2
+        print(logtmin, logtmax)
+        fftlog = dark_emulator.pyfftlog_interface.fftlog(logrmin=logtmin, logrmax=logtmax, num=2)
+        mu = self.probe_mu_dict[probe]
+        input_Cl = loginterp1d(l, Cl, fftlog.k)*fftlog.k
         
         fftlog_out = fftlog.iHT(input_Cl, mu, 0.0, -1, 1.0/2.0/np.pi)
+        
+        if binave:
+            None # do something
         #acf = loginterp1d(fftlog.r, fftlog_out, theta)
         acf = ius(fftlog.r, fftlog_out)(theta)
         
@@ -698,14 +747,47 @@ class pk2cl_class:
             plt.figure()
             plt.xlabel(r'$\theta$')
             plt.ylabel(self.probe_latex_dict[probe])
-            plt.loglog(fftlog.r, fftlog_out, c='C0')
+            plt.loglog(fftlog.r, fftlog_out, c='C0', label='fftlog on fftlog grid')
             plt.loglog(fftlog.r,-fftlog_out, c='C0',ls='--')
-            plt.loglog(theta, acf, c='C1')
+            plt.loglog(theta, acf, c='C1', label='fftlog')
             plt.loglog(theta,-acf, c='C1', ls='--')
+            if plot_with is not None:
+                for d in plot_with:
+                    plt.plot(d['xy'][0], d['xy'][1], c=d['c'], label=d.get('label', ''))
+                    plt.plot(d['xy'][0],-d['xy'][1], c=d['c'], ls='--')
+            plt.legend()
             plt.show()
         return acf
+    
+    def angular_correlation_function_bruteforce(self, name1, name2, theta, probe, binave=False, dlnt=None, plot=False):
+        l = self.Cl_cache['Cl']['l']
+        Cl = copy.deepcopy(self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ])
+        # more factors
+        if probe == 'wp':
+            Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
+            Cl *= Delta_chi_g
+
+        if binave and dlnt is None:
+            dlnt = np.log(theta[1]/theta[0])
+
+        mu = self.probe_mu_dict[probe]
+
+        def helper(t):
+            dump = np.exp(-(l*t)**2/(30*np.pi)**2)
+            if binave:
+                j = jn_binave(mu, l, t, t*np.exp(dlnt))
+            else:
+                j = jn(mu, l*t)
+            ans = simps(l**2*Cl/2.0/np.pi * j * dump, np.log(l))
+            return ans
+
+        acf = np.array([ helper(t) for t in theta])
+        return acf
         
-    def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, dlnt1=None, dlnt2=None, plot=False):
+    def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
+        """
+        
+        """
         l = self.Cl_cache['Cl']['l']
         Cl1 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names1) ]
         Cl2 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names2) ]
@@ -716,13 +798,19 @@ class pk2cl_class:
                         N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
         mu1 = self.probe_mu_dict[probe1]
         mu2 = self.probe_mu_dict[probe2]
-        if dlnt1 is None:
+        if binave and dlnt1 is None:
             dlnt1 = np.log(theta1[1]/theta1[0])
-        if dlnt2 is None:
+        if binave and dlnt2 is None:
             dlnt2 = np.log(theta2[1]/theta2[0])
+        if not binave:
+            dlnt1, dlnt2 = 0, 0
         print(dlnt1, dlnt2)
-        t1_fine, t2_fine, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
-        cov = interp2d(t1_fine, t2_fine, cov_fine)(theta1, theta2)
+        if binave:
+            t1_min, t2_min, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
+        else:
+            # no binave, not implemented yet.
+            t1_min, t2_min, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
+        cov = interp2d(t1_min, t2_min, cov_fine)(theta1, theta2)
         
         if plot:
             fig = plt.figure(figsize=(10, 8))
@@ -748,7 +836,7 @@ class pk2cl_class:
             plt.show()
         return cov
         
-        
+    
         
         
         
