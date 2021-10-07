@@ -842,8 +842,7 @@ class pk2cl_class:
         
         
     
-    
-    
-        
-        
+      
 # shape noise signa^2/n or sigma^2/2/n ?
+# binave implementation
+# 
