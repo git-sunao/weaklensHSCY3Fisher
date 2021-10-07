@@ -6,11 +6,13 @@ except:
 print('using dark_emulator at ', dark_emulator.__file__)
 import os, sys, json
 import matplotlib.pyplot as plt
-import my_python_package as mpp
 from collections import OrderedDict as od
-from pyhalofit import pyhalofit
+try:
+    from pyhalofit import pyhalofit
+except:
+    print('pyhalofit is not installed. Clone https://github.com/git-sunao/pyhalofit.')
 from scipy.interpolate import InterpolatedUnivariateSpline as ius
-from scipy.interpolate import interp2d
+from scipy.interpolate import interp2d, interp1d
 from time import time
 from scipy.integrate import simps
 from tqdm import tqdm
@@ -22,6 +24,46 @@ from astropy import constants
 #H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
 H0 = 1e5 / constants.c.value # /(Mpc/h)
 
+class Silent:
+    def __init__(self, silent=True):
+        self.silent = silent
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        if self.silent:
+            sys.stdout = open(os.devnull, 'w')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.silent:
+            sys.stdout.close()
+        sys.stdout = self._original_stdout
+        
+def grep(listdir,string):
+    a = list()
+    for l in listdir:
+        if string in l:
+            a.append(l)
+    return a
+        
+class Time:
+    def __init__(self, echo=True, message=None):
+        self.echo = echo
+        if message is not None:
+            self.message = message
+        else:
+            self.message = ''
+        
+    def __enter__(self):
+        self.t_start = time()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.echo:
+            print(f'{self.message}:{time()-self.t_start}')
+
+def loginterp1d(x, y, xin):
+    return 10**interp1d(np.log10(x), np.log10(y),
+                        bounds_error=False, 
+                        fill_value='extrapolate')(np.log10(xin))
+
 #######################################
 #
 # power spectrum class
@@ -32,6 +74,7 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         self.halofit = pyhalofit.halofit()
         self.cosmo_dict = {'omega_b': 0.02225, 'omega_c': 0.1198, 'Omega_de': 0.6844, 'ln10p10As': 3.094, 'n_s': 0.9645, 'w_de': -1.0}
         self.set_cosmology_from_dict(self.cosmo_dict)
+        self.pkhalo_lchi_method = 'kz_table' # or 'lchi_table'
         
     def set_cosmology_from_dict(self, cosmo_dict):
         c = np.array([[cosmo_dict[n] for n in ['omega_b', 'omega_c', 'Omega_de', 'ln10p10As', 'n_s', 'w_de']]])
@@ -51,30 +94,71 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         _Dp = np.array([self.Dgrowth_from_z(__z) for __z in _z])
         return ius(_z, _Dp, ext=1)(z)
     
-    def init_pklin(self, zmax, kmax=1e3, kbin=300, zbin=100):
-        logk = np.linspace(-4, np.log10(kmax), kbin)
+    def init_pklin(self, zmax, kbin=50, zbin=100):
         z = np.linspace(0.0, zmax, zbin)
-        pkL= self.get_pklin(10**logk)
         Dp = self.get_Dgrowth(z)
-        self.pk_data = {'logk':logk, 'z':z, 'pkL':pkL, 'Dp':Dp}
+        k = np.logspace(-4, 1, kbin)
+        pkL = self.get_pklin(k)
+        self.pklin_data = {'z':z, 'Dp':Dp, 'k':k, 'pkL':pkL}
+        self.zmax = zmax
+        self.chi_max = self.get_chi_from_z(self.zmax)
         
-    def init_pkhalo(self):
-        k = 10**self.pk_data['logk']
-        data = []
-        for _z, _Dp in zip(self.pk_data['z'], self.pk_data['Dp']):
-            pklin = self.pk_data['pkL'] * _Dp**2
-            self.halofit.set_pklin(k, pklin, _z)
+    def init_pkhalo(self, kbin=200):
+        klin = np.logspace(-4, 4, 1000)
+        pkL  = self.get_pklin(klin)
+        self.k_peak = klin[np.argmax(pkL)]
+        z, Dp = self.pklin_data['z'], self.pklin_data['Dp']
+        khalo = np.logspace(-4, 2, kbin)
+        pkhalo2d = []
+        for _z, _Dp in zip(z, Dp):
+            pklin = pkL * _Dp**2
+            self.halofit.set_pklin(klin, pklin, _z)
             pkhalo = self.halofit.get_pkhalo()
-            data.append(pkhalo)
-        self.pk_data['pkhalo'] = np.array(data)
+            pkhalo = 10**ius(np.log10(klin), np.log10(pkhalo))(np.log10(khalo))
+            pkhalo2d.append(pkhalo)
+        self.pkhalo_data = {'z':z, 'k':khalo, 'pkhalo':np.array(pkhalo2d)}
+        
+        if self.pkhalo_lchi_method == 'lchi_table':
+            self.init_pkhalo_lchi()
+        
+    def init_pkhalo_lchi(self, lmin=1e-4, lmax=1e4, lbin=100, chibin=400):
+        l = np.logspace(np.log10(lmin), np.log10(lmax), lbin)
+        pkhalo_lchi, chi, chi_max = [], [], self.chi_max
+        for _l in l:
+            chi_peak = _l/self.k_peak
+            if chi_peak*1e3 < chi_max:
+                _chi = np.logspace(np.log10(chi_peak)-3, np.log10(chi_peak)+3, chibin)
+            else:
+                _chi = np.logspace(np.log10(chi_max)-3 , np.log10(chi_max), chibin)
+            k = _l/_chi
+            z = self.get_z_from_chi(_chi)
+            _pkhalo = []
+            for _k, _z in zip(k, z):
+                _pkhalo.append(self.get_pkhalo_kz(_k, _z))
+            pkhalo_lchi.append(_pkhalo)
+            chi.append(_chi)
+        pkhalo_lchi, chi = np.array(pkhalo_lchi), np.array(chi)
+        self.pkhalo_lchi_data = {'l':l, 'chi':chi, 'pkhalo':pkhalo_lchi}
         
     def get_pklin_kz(self, k, z):
         return self.get_pklin_from_z(k, z)
     
     def get_pkhalo_kz(self, k, z):
-        f = interp2d(self.pk_data['logk'], self.pk_data['z'], np.log10(self.pk_data['pkhalo']), 
-                     bounds_error=False, fill_value=-300)
-        return 10**f(np.log10(k), z)
+        if z <= self.pkhalo_data['z'].min():
+            pkhalo = loginterp1d(self.pkhalo_data['k'], self.pkhalo_data['pkhalo'][0, :], k)
+            return pkhalo
+        elif z>= self.pkhalo_data['z'].max():
+            pkhalo = loginterp1d(self.pkhalo_data['k'], self.pkhalo_data['pkhalo'][-1, :], k)
+            return pkhalo
+        else:
+            idx0 = np.argwhere(self.pkhalo_data['z'] < z)[-1][0]
+            idx1 = idx0+1
+            pkhalo0 = loginterp1d(self.pkhalo_data['k'],self.pkhalo_data['pkhalo'][idx0,:], k)
+            pkhalo1 = loginterp1d(self.pkhalo_data['k'],self.pkhalo_data['pkhalo'][idx1,:], k)
+            z0 = self.pkhalo_data['z'][idx0]
+            z1 = self.pkhalo_data['z'][idx1]
+            pkhalo = (np.log10(pkhalo1)-np.log10(pkhalo0))/(z1-z0)*(z-z0) + np.log10(pkhalo0)
+            return 10**pkhalo
     
     def get_chi_from_z(self, z):
         """
@@ -87,30 +171,63 @@ class power_b1_class(dark_emulator.darkemu.base_class):
         _chi = self.get_chi_from_z(_z)
         return ius(_chi, _z)(chi)
     
-    def get_pklin_lchi(self, l, chi, N_low=100, N_high=100):
+    def z2chi(self, z):
+        return self.get_chi_from_z(z)
+    
+    def chi2z(self, chi):
+        return self.get_z_from_chi(chi)
+    
+    def get_pklin_lchi(self, l, chi):
         """
         return pk(k=l/chi, z=z(chi))
         """
         z = self.get_z_from_chi(chi)
-        Dp = ius(self.pk_data['z'], self.pk_data['Dp'], ext=1)(z)
-        logk_extrap   = log_extrap(self.pk_data['logk'], N_low, N_high)
-        logpkL_extrap = np.log10(log_extrap(self.pk_data['pkL'], N_low, N_high))
-        pkL= 10**ius(logk_extrap, logpkL_extrap, ext=1)( np.log10(l/chi) )
+        Dp = ius(self.pklin_data['z'], self.pklin_data['Dp'], ext=1)(z)
+        k = l/chi
+        pkL = loginterp1d(self.pklin_data['k'], self.pklin_data['pkL'],k)
         return Dp**2*pkL
     
-    def get_pkhalo_lchi(self, l, chi, N_low=100, N_high=100):
-        z = self.get_z_from_chi(chi)
-        logk = np.log10(l/chi)
-        logk_extrap = log_extrap(self.pk_data['logk'], N_low, N_high)
-        pkhalo_extrap = [log_extrap(self.pk_data['pkhalo'][i, :], N_low, N_high) 
-                         for i in range(len(self.pk_data['z']))]
-        logpkhalo_extrap = np.log10(pkhalo_extrap)
-        f = interp2d(logk_extrap, self.pk_data['z'], logpkhalo_extrap, 
-                     bounds_error=False, fill_value=-300)
-        ans = []
-        for _logk, _z in zip(logk, z):
-            ans.append(10**f(_logk, _z))
-        return np.array(ans).reshape(chi.shape)
+    def get_pkhalo_lchi(self, l, chi):
+        if self.pkhalo_lchi_method == 'lchi_table':
+            return self.get_pkhalo_lchi_from_lchi_table(l, chi)
+        elif self.pkhalo_lchi_method == 'kz_table':
+            return self.get_pkhalo_lchi_from_kz(l, chi)
+    
+    def get_pkhalo_lchi_from_lchi_table(self, l, chi):
+        """
+        This function use a prepared table.
+        However making table (self.init_pkhalo_lchi) take 
+        too much time (~8sec) and this function itself is not so fast.
+        naive implimentation would not be so bad.
+        """
+        if l <= self.pkhalo_lchi_data['l'].min():
+            pkhalo = loginterp1d(self.pkhalo_lchi_data['chi'][0,:], self.pkhalo_lchi_data['pkhalo'][0, :], chi)
+            return pkhalo
+        elif l>= self.pkhalo_lchi_data['l'].max():
+            pkhalo = loginterp1d(self.pkhalo_lchi_data['chi'][-1,:], self.pkhalo_lchi_data['pkhalo'][-1, :], chi)
+            return pkhalo
+        else:
+            idx0 = np.argwhere(self.pkhalo_lchi_data['l'] < l)[-1][0]
+            idx1 = idx0+1
+            pkhalo0 = loginterp1d(self.pkhalo_lchi_data['chi'][idx0,:], self.pkhalo_lchi_data['pkhalo'][idx0,:], chi)
+            pkhalo1 = loginterp1d(self.pkhalo_lchi_data['chi'][idx1,:],self.pkhalo_lchi_data['pkhalo'][idx1,:], chi)
+            l0 = self.pkhalo_lchi_data['l'][idx0]
+            l1 = self.pkhalo_lchi_data['l'][idx1]
+            pkhalo = (np.log10(pkhalo1)-np.log10(pkhalo0))/(l1-l0)*(l-l0) + np.log10(pkhalo0)
+            return 10**pkhalo
+    
+    def get_pkhalo_lchi_from_kz(self, l, chi):
+        def sparse(chi):
+            k, z = l/chi, self.chi2z(chi)
+            ans = []
+            for _k, _z in zip(k, z):
+                ans.append(self.get_pkhalo_kz(_k, _z))
+            return np.array(ans)
+        if len(chi) > 100:
+            chi_sparse = chi[::4]
+            return loginterp1d(chi_sparse, sparse(chi_sparse),chi)
+        else:
+            return sparse(chi)
     
     def get_pklingm_lchi(self, l, chi, b1):
         return b1*self.get_pklin_lchi(l, chi)
@@ -252,6 +369,9 @@ class galaxy_sample_source_class(galaxy_base_class):
     
     def window_lensing_chirange(self):
         return window_lensing_chirange(self.info['z_source'], self.z2chi)
+    
+    def get_chi_source(self):
+        return self.z2chi(self.info['z_source'])
 
 class galaxy_sample_lens_class(galaxy_base_class):
     info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
@@ -288,6 +408,17 @@ class galaxy_sample_lens_class(galaxy_base_class):
     
     def window_magnification_chirange(self):
         return window_lensing_chirange(self.z_lens_eff, self.z2chi)
+    
+    def get_chi_lens(self):
+        return self.z2chi(self.info['z_lens'])
+    
+    def get_Delta_chi(self):
+        cr = self.window_galaxy_chirange()
+        return cr.max()-cr.min()
+    
+    def get_Delta_chi_g(self):
+        return self.get_Delta_chi()
+        
 
 #######################################
 #
@@ -299,11 +430,16 @@ class pk2cl_class:
     ::math::
         C(l) = P(l) = \int{\rm d}\chi W_1(\chi )W_2(\chi)P\left(\frac{l}{\chi}, z(\chi)\right)
     """
+    probe_mu_dict = {'xi_plus':0, 'xi+':0, 'xi_minus':4, 'xi-':4, 'wp':0, 'gamma_t':2}
+    probe_latex_dict = {'xi+':r'$\xi_+$', 'xi-':r'$\xi_-$', 'gamma_t':r'$\gamma_\mathrm{t}$', 'wp':r'$w_\mathrm{p}$'}
     def __init__(self, pk_class=None):
         self.pk_class = pk_class
         self.galaxy_sample_dict = od()
         self.cl_cache = od()
         self.cl_cache_sep = '-'
+        self.chi_bin_lens_kernel = 50 # used to compute \int \diff\chi W_lensing(\chi)W_lensing(\chi)/\chi^2 P(l/\chi, z(\chi))
+        self.chi_bin_galaxy_window = 20 # used to compute \int\diff\chi W_galaxy(\chi)W_X(\chi) /\chi^2 P(l/\chi, z(\chi))
+        self.Cl_names_sep = ','
         
     def set_galaxy_sample(self, galaxy_sample):
         if galaxy_sample.info['sample_name'] in self.galaxy_sample_dict.keys():
@@ -336,15 +472,17 @@ class pk2cl_class:
         zmax = self.get_zmax_from_galaxy_samples()
         self.pk_class.init_pklin(zmax)
         self.pk_class.init_pkhalo()
-        self.k_peak = 10**self.pk_class.pk_data['logk'][np.argmax(self.pk_class.pk_data['pkL'])]
+        self.k_peak = self.pk_class.k_peak
+    
+    def get_galaxy_sample(self, name):
+        return self.galaxy_sample_dict[name]
         
-    def _Cgg(self, name1, name2, l, model='nonlin', chi_bin=100, plot=False, plot_xlog=False):
+    def _Cgg(self, sample1, sample2, l, model='nonlin', plot=False, plot_xlog=False):
         ans = 0
-        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
         b1_1, b1_2 = sample1.info['galaxy_bias'], sample2.info['galaxy_bias']
         alpha_mag1, alpha_mag2 = sample1.info['alpha_mag'], sample2.info['alpha_mag']
         # g g
-        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_galaxy_chirange(), chi_bin)
+        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkgg_lchi(l, chi, b1_1, b1_2, model)
         w1, w2 = sample1.window_galaxy(chi, z), sample2.window_galaxy(chi, z)
@@ -354,43 +492,45 @@ class pk2cl_class:
             plt.xlabel(r'$\chi$')
             plt.yscale('log')
             plt.xscale('log') if plot_xlog else None
-            plt.plot(chi, w1*w2*plchi/chi**2)
+            plt.plot(chi, w1*w2*plchi/chi**2, label='g, g')
+            plt.plot(chi, w1*w2*plchi.max()/chi**2)
+            print(f'Cgg(l)                                ={ans}')
         # g mag
-        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_magnification_chirange(), chi_bin)
+        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_magnification_chirange(), self.chi_bin_galaxy_window)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_1, model)
         w1, w2 = sample1.window_galaxy(chi, z), sample2.window_magnification(chi, z)
         ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag2-1)
         if plot:
-            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag2-1))
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag2-1), label='g, mag')
+            print(f'Cgg(l)+Cg,mag(l)                      ={ans}')
         # mag g
-        chi = get_chi_overlap( sample1.window_magnification_chirange(), sample2.window_galaxy_chirange(), chi_bin)
+        chi = get_chi_overlap( sample1.window_magnification_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_2, model)
         w1, w2 = sample1.window_magnification(chi, z), sample2.window_galaxy(chi, z)
         ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1)
         if plot:
-            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1))
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1), label='mag, g')
+            print(f'Cgg(l)+Cg,mag(l)+Cmag,g(l)            ={ans}')
         # mag mag
-        chi = get_chi_lensing( sample1.window_magnification_chirange(), sample2.window_magnification_chirange(), chi_bin, l/self.k_peak/100.0)
+        chi = get_chi_lensing( sample1.window_magnification_chirange(), sample2.window_magnification_chirange(), 
+                              self.chi_bin_lens_kernel, l/self.k_peak/100.0)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample1.window_magnification(chi, z), sample2.window_magnification(chi, z)
         ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1) * 2*(alpha_mag2-1)
         if plot:
-            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1) * 2*(alpha_mag2-1))
+            plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1) * 2*(alpha_mag2-1), label='mag,mag')
+            plt.legend()
+            print(f'Cgg(l)+Cg,mag(l)+Cmag,g(l)+Cmag,mag(l)={ans}')
         return ans
 
-    def _CgE(self, name1, name2, l, model='nonlin', chi_bin=100,plot=False, plot_xlog=False):
+    def _CgE(self, sample_l, sample_s, l, model='nonlin',plot=False, plot_xlog=False):
         ans = 0
-        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-        if sample1.sample_type == 'lens' and sample2.sample_type == 'source':
-            sample_l, sample_s = sample1, sample2
-        elif sample1.sample_type == 'source' and sample2.sample_type == 'lens':
-            sample_l, sample_s = sample2, sample1
         b1, alpha = sample_l.info['galaxy_bias'], sample_l.info['alpha_mag']
         # g E
-        chi = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), chi_bin)
+        chi = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), self.chi_bin_galaxy_window)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkgm_lchi(l, chi, b1, model)
         w1, w2 = sample_l.window_galaxy(chi, z), sample_s.window_lensing(chi, z)
@@ -401,7 +541,8 @@ class pk2cl_class:
             plt.xscale('log') if plot_xlog else None
             plt.plot(chi, w1*w2*plchi/chi**2)
         # mag E
-        chi = get_chi_lensing( sample_l.window_magnification_chirange(), sample_s.window_lensing_chirange(), chi_bin, l/self.k_peak/100.0)
+        chi = get_chi_lensing( sample_l.window_magnification_chirange(), sample_s.window_lensing_chirange(), 
+                              self.chi_bin_lens_kernel, l/self.k_peak/100.0)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample_l.window_magnification(chi, z), sample_s.window_lensing(chi, z)
@@ -410,10 +551,10 @@ class pk2cl_class:
             plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha-1))
         return ans
     
-    def _CEE(self, name1, name2, l, model='nonlin', chi_bin=100, plot=False, plot_xlog=False):
-        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+    def _CEE(self, sample1, sample2, l, model='nonlin', plot=False, plot_xlog=False):
         # EE
-        chi = get_chi_lensing( sample1.window_lensing_chirange(), sample2.window_lensing_chirange(), chi_bin, l/self.k_peak/100.0)
+        chi = get_chi_lensing( sample1.window_lensing_chirange(), sample2.window_lensing_chirange(), 
+                              self.chi_bin_lens_kernel, l/self.k_peak/100.0)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample1.window_lensing(chi, z), sample2.window_lensing(chi, z)
@@ -425,349 +566,196 @@ class pk2cl_class:
             plt.plot(chi, w1*w2*plchi/chi**2)
         return ans
     
-    def Cgg(self, name1, name2, l, model='nonlin', chi_bin=100):
-        return np.array([ self._Cgg(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
+    def _logspace_l_array(self, min_max_bin_list):
+        l = []
+        for args in min_max_bin_list:
+            log_lmin, log_lmax, lbin = args
+            _l = np.logspace(log_lmin, log_lmax, lbin)
+            l.append(_l)
+        l = np.hstack(l)
+        return sorted(l)
     
-    def CgE(self, name1, name2, l, model='nonlin', chi_bin=100):
-        return np.array([ self._CgE(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
+    def _l_array_peakBAO(self, llp):
+        l_sparse = self._logspace_l_array([[llp-4  , llp-0.5, 10],
+                                          [llp-0.5, llp+1.4, 50], # peak & BAO
+                                          [llp+1.4, llp+4.0, 10 ]])
+        return l_sparse
     
-    def CEE(self, name1, name2, l, model='nonlin', chi_bin=100):
-        return np.array([ self._CEE(name1, name2, _l, model=model, chi_bin=chi_bin) for _l in l])
-        
-    def 
-        
-        
-        
-        
-        
-        
-        
-    def _get_chi_from_2samples(self, sample1, sample2, chi_bin=100):
-        chi_min1, chi_max1 = sample1.get_chi_range()
-        chi_min2, chi_max2 = sample2.get_chi_range()
-        chi = np.linspace(min(chi_min1, chi_min2), max(chi_max1, chi_max2), chi_bin)
-        z = self.pk_class.get_z_from_chi(chi)
-        return chi, z
-        
-    def _Pgg2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100):
-        integrand = 0
+    def Cgg(self, name1, name2, l, model='nonlin', plot=False):
+        # get samples
         sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-        b1_1, b1_2 = sample1.info['galaxy_bias'], sample2.info['galaxy_bias']
-        ans = 0
-        # gg
-        chi, z = self._get_chi_from_2samples(sample1, sample2)
-        pkgg_lz  = self.pk_class.get_pkgg_lchi(l, chi)
-        integrand+= sample1.window(chi, z)*sample2.window(chi, z)*power
-        ans += np.sum(integrand*k)*dlnk/l
-        # gm
-        chi, z = self._get_chi_from_2samples(sample1, sample2)
-        pkgg_lz  = self.pk_class.get_pkgg_lchi(l, chi)
-        integrand+= sample1.window(chi, z)*sample2.window(chi, z)*power
-        ans += np.sum(integrand*k)*dlnk/l
+        # init l array for interplation
+        chi_mean = (sample1.get_chi_lens()+sample2.get_chi_lens())/2
+        llp = np.log10(self.pk_class.k_peak*chi_mean) # log_l_peak
+        l_sparse = self._l_array_peakBAO(llp)
+        ans_sparse = [ self._Cgg(sample1, sample2, _l, model=model) for _l in l_sparse]
+        if plot:
+            plt.figure()
+            plt.loglog(l_sparse, ans_sparse, marker='.')
+            plt.show()
+        return loginterp1d(l_sparse, ans_sparse, l)
+    
+    def CgE(self, name1, name2, l, model='nonlin', plot=False):
+        # get samples
+        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+        if sample1.sample_type == 'lens' and sample2.sample_type == 'source':
+            sample_l, sample_s = sample1, sample2
+        elif sample1.sample_type == 'source' and sample2.sample_type == 'lens':
+            sample_l, sample_s = sample2, sample1
+        # init l array for interpolation
+        llp = np.log10(self.pk_class.k_peak*sample_l.get_chi_lens()) # log_l_peak
+        l_sparse = self._l_array_peakBAO(llp)
+        ans_sparse = np.array([ self._CgE(sample_l, sample_s, _l, model=model) for _l in l_sparse])
+        if plot:
+            plt.figure()
+            plt.loglog(l_sparse, ans_sparse, marker='.')
+            plt.show()
+        return loginterp1d(l_sparse, ans_sparse, l)
+    
+    def CEE(self, name1, name2, l, model='nonlin', plot=False):
+        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
+        l_sparse = np.logspace(-2, 4, 60)
+        ans_sparse = np.array([ self._CEE(sample1, sample2, _l, model=model) for _l in l_sparse])
+        return loginterp1d(l_sparse, ans_sparse, l)
+    
+    def get_samples(self, sample_type=''):
+        lens_samples = []
+        for name, sample in self.galaxy_sample_dict.items():
+            if sample.sample_type == 'lens':
+                lens_samples = 0
+    
+    def compute_all_Cl(self, l, model='nonlin'):
+        lens_samples   = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'lens']
+        source_samples = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'source']
         
-        z, chi, k, power  = self.power3d.get_Pgm_lz(l, z_min, z_max, model=model, kbin=kbin, b1=b1_1)
-        integrand+= sample1.window(chi, z)*2*(sample2.info['alpha_mag']-1)*sample2.window_mag(chi, z)*power
-        # mg
-        z, chi, k, power  = self.power3d.get_Pgm_lz(l, z_min, z_max, model=model, kbin=kbin, b1=b1_2)
-        integrand+= 2*(sample1.info['alpha_mag']-1)*sample1.window_mag(chi, z)*sample2.window(chi, z)*power
-        # mm
-        z, chi, k, power  = self.power3d.get_Pmm_lz(l, z_min, z_max, model=model, kbin=kbin)
-        integrand+= 2*(sample1.info['alpha_mag']-1)*2*sample1.window_mag(chi, z)*(sample2.info['alpha_mag']-1)*sample2.window_mag(chi, z)*power
-        # integrate
-        dlnk = np.diff(np.log(k))[0]
-        ans = np.sum(integrand*k)*dlnk/l
-        return ans
-    
-    def _PgE2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100):
-        integrand = 0
-        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-        z_min, z_max = self.init_convolve(sample1, sample2)
-        b1 = sample1.info['galaxy_bias']
-        # gm
-        z, chi, k, power  = self.power3d.get_Pgm_lz(l, z_min, z_max, model=model, kbin=kbin, b1=b1)
-        integrand+= sample1.window(chi, z)*sample2.window(chi, z)*power
-        # mm
-        z, chi, k, power  = self.power3d.get_Pmm_lz(l, z_min, z_max, model=model, kbin=kbin)
-        integrand+= 2*(sample1.info['alpha_mag']-1)*2*sample1.window_mag(chi, z)*sample2.window(chi, z)*power
-        # integrate
-        dlnk = np.diff(np.log(k))[0]
-        ans = np.sum(integrand*k)*dlnk/l
-        return ans
-    
-    def _PEE2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100):
-        integrand = 0
-        sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-        z_min, z_max = self.init_convolve(sample1, sample2)
-        # mm
-        z, chi, k, power  = self.power3d.get_Pmm_lz(l, z_min, z_max, model=model, kbin=kbin)
-        integrand+= sample1.window(chi, z)*sample2.window(chi, z)*power
-        # integrate
-        dlnk = np.diff(np.log(k))[0]
-        ans = np.sum(integrand*k)*dlnk/l
-        return ans
-    
-    def _P2Dconvolve(self, func, name1, name2, l, model='nonlin', kbin=100, progress=True, desc='', cache=True):
-        ans = []
-        if progress:
-            for _l in  tqdm(l, desc=desc):
-                _ans = func(name1, name2, _l, model=model, kbin=kbin)
-                ans.append(_ans)
-        else:
-            for _l in l:
-                _ans = func(name1, name2, _l, model=model, kbin=kbin)
-                ans.append(_ans)
-        ans = np.reshape(np.array([ans]), l.shape)
-        if cache:
-            self.P2Dcache[self.P2Dcache_sep.join([name1, name2])] = {'l':l, 'P2D':ans}
-        return ans
-    
-    def _P2Dconvolve_list(self, func_name1_name2_list, l, model='nonlin', kbin=100, progress=True, desc=''):
-        """
-        for fast computation for b1 model
-        """
-        ans_list = [[] for _ in range(len(func_name1_name2_list))]
-        def compute(_l):
-            for i, func_name1_name2 in enumerate(func_name1_name2_list):
-                func, name1, name2 = func_name1_name2
-                ans = func(name1, name2, _l, model=model, kbin=kbin)
-                ans_list[i].append(ans)
-        if progress:
-            for _l in tqdm(l, desc=desc):
-                compute(_l)
-        else:
-            for _l in l:
-                compute(_l)
-        return np.array(ans_list)
-    
-    def Pgg2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100, progress=False, desc='Pgg', cache=True):
-        return self._P2Dconvolve(self._Pgg2Dconvolve, name1, name2, l, model=model, kbin=kbin, progress=progress, desc=desc, cache=cache)
-    
-    def PgE2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100, progress=False, desc='PgE', cache=True):
-        return self._P2Dconvolve(self._PgE2Dconvolve, name1, name2, l, model=model, kbin=kbin, progress=progress, desc=desc, cache=cache)
-    
-    def PEE2Dconvolve(self, name1, name2, l, model='nonlin', kbin=100, progress=False, desc='PEE', cache=True):
-        return self._P2Dconvolve(self._PEE2Dconvolve, name1, name2, l, model=model, kbin=kbin, progress=progress, desc=desc, cache=cache)
-    
-    def compute_all_P2D(self, l, model='nonlin', kbin=100, progress=False):
-        names = self.get_galaxy_sample_names()
-        for name1 in names:
-            for name2 in names:
-                if self.P2Dcache_sep.join([name1, name2]) in self.P2Dcache.keys():
-                    ans = self.P2Dcache[self.P2Dcache_sep.join([name1, name2])]['P2D']
-                elif self.P2Dcache_sep.join([name2, name1]) in self.P2Dcache.keys():
-                    ans = self.P2Dcache[self.P2Dcache_sep.join([name2, name1])]['P2D']
-                else:
-                    sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-                    if sample1.info['sample_type'] == 'lens' and sample2.info['sample_type'] == 'lens':
-                        ans = self.Pgg2Dconvolve(name1, name2, l, model=model, kbin=kbin, progress=progress, desc=f'Pgg {name1}, {name2}', cache=False)
-                    elif sample1.info['sample_type'] == 'lens' and sample2.info['sample_type'] == 'source':
-                        ans = self.PgE2Dconvolve(name1, name2, l, model=model, kbin=kbin, progress=progress, desc=f'PgE {name1}, {name2}', cache=False)
-                    elif sample1.info['sample_type'] == 'source' and sample2.info['sample_type'] == 'lens':
-                        ans = self.PgE2Dconvolve(name2, name1, l, model=model, kbin=kbin, progress=progress, desc=f'PgE {name2}, {name1}', cache=False)
-                    elif sample1.info['sample_type'] == 'source' and sample2.info['sample_type'] == 'source':
-                        ans = self.PEE2Dconvolve(name1, name1, l, model=model, kbin=kbin, progress=progress, desc=f'PEE {name1}, {name2}', cache=False)
-                self.P2Dcache[self.P2Dcache_sep.join([name1, name2])] = {'l':l, 'P2D':ans}
+        self.Cl_cache = od()
+        self.Cl_cache['condition'] = od()
+        self.Cl_cache['condition'] = model
+        
+        self.Cl_cache['Cl'] = od()
+        self.Cl_cache['Cl']['l'] = l
+        def helper(name1, name2, func):
+            key = self.Cl_names_sep.join([name1, name2])
+            key_inv = self.Cl_names_sep.join([name2, name1])
+            if key_inv in self.Cl_cache.keys():
+                self.Cl_cache['Cl'][key] = self.Cl_cache[key_inv]
+            else:
+                self.Cl_cache['Cl'][key] = func(name1, name2, l, model=model)
+        # Cgg
+        for name1 in lens_samples:
+            for name2 in lens_samples:
+                helper(name1, name2, self.Cgg)
+        # CgE
+        for name1 in lens_samples:
+            for name2 in source_samples:
+                helper(name1, name2, self.CgE)
+        # CEE
+        for name1 in source_samples:
+            for name2 in source_samples:
+                helper(name1, name2, self.CEE)
                 
-    def compute_all_P2D_list(self, l, model='nonlin', kbin=100, progress=True):
-        names = self.get_galaxy_sample_names()
-        func_name1_name2_dict = od()
-        for name1 in names:
-            for name2 in names:
-                if not(self.P2Dcache_sep.join([name1, name2]) in func_name1_name2_dict.keys()) and not(self.P2Dcache_sep.join([name2, name1]) in func_name1_name2_dict.keys()):
-                    sample1, sample2 = self.galaxy_sample_dict[name1], self.galaxy_sample_dict[name2]
-                    if sample1.info['sample_type'] == 'lens' and sample2.info['sample_type'] == 'lens':
-                        func_name1_name2 = [self._PgE2Dconvolve, name1, name2]
-                    elif ample1.info['sample_type'] == 'lens' and sample2.info['sample_type'] == 'source':
-                        func_name1_name2 = [self._PgE2Dconvolve, name1, name2]
-                    elif sample1.info['sample_type'] == 'source' and sample2.info['sample_type'] == 'lens':
-                        func_name1_name2 = [self._PgE2Dconvolve, name2, name1]
-                    elif sample1.info['sample_type'] == 'source' and sample2.info['sample_type'] == 'source':
-                        func_name1_name2 = [self._PEE2Dconvolve, name1, name2]
-                func_name1_name2_dict[self.P2Dcache_sep.join([name1, name2])] = func_name1_name2
-                
-        func_name1_name2_list = list(func_name1_name2_dict.values())
-        ans = self._P2Dconvolve_list(func_name1_name2_list, l, model=model, kbin=kbin, progress=progress, desc='')
-        for i, key in enumerate(func_name1_name2_dict.keys()):
-            self.P2Dcache[key] = {'l':l, 'P2D':ans[i]}
-        
-        for name1 in names:
-            for name2 in names:
-                if not self.P2Dcache_sep.join([name1, name2]) in self.P2Dcache.keys():
-                    self.P2Dcache[self.P2Dcache_sep.join([name1, name2])] = self.P2Dcache[self.P2Dcache_sep.join([name2, name1])]
-    
-    def dump_cache(self, dirname, override=False):
-        if (not os.path.exists(dirname)) or override:
-            print(f'dumping result to {dirname}')
-            os.makedirs(dirname) if not os.path.exists(dirname) else None
-            # power spectrum class
-            fname = os.path.join(dirname, 'power3d.txt')
-            print(f'Saving power3d to {fname}.')
-            with open(fname, 'w') as f:
-                f.write(str(type(self.power3d)))
-            # cosmology
-            fname = os.path.join(dirname, 'cosmology.json')
-            print(f'Saving cosmology to {fname}')
-            json.dump(self.cosmo_dict, open(fname, 'w'), indent=3, ensure_ascii=False)
-            # galaxy sample
-            print(f'Saving galaxy samples to...')
-            for name, sample in self.galaxy_sample_dict.items():
-                fname = os.path.join(dirname, name+'.json')
-                print(f'  {fname}')
-                json.dump(sample.get_sample_info(), open(fname, 'w'), indent=3, ensure_ascii=False)
-            # P2D(Cl)
-            print(f'Saving angular power spectra to...')
-            for comb, P2D in self.P2Dcache.items():
-                data = np.array([P2D['l'], P2D['P2D']]).T
-                fname= os.path.join(dirname, comb+'.txt')
-                print(f'  {fname}')
-                np.savetxt(fname, data)
+    def dump_Cl_cache(self,dirname, overwrite=False):
+        if (not os.path.exists(dirname)) or overwrite:
+            if not os.path.exists(dirname):
+                os.makedirs(dirname)
+            for key in self.Cl_cache['Cl'].keys():
+                fname = os.path.join(dirname, key+'.txt')
+                print(f'saving {key} to {fname}')
+                np.savetxt(fname, self.Cl_cache['Cl'][key])
         else:
             print(f'{dirname} already exists.')
             
-    def load_cache(self, dirname):
-        # power3d
-        fname = os.path.join(dirname, 'power3d.txt')
-        with open(fname, 'r') as f:
-            power3d_name = f.readline()
-        if power3d_name == "<class 'hsc3x2pt.power_b1_class'>":
-            self.power3d = power_b1_class()  
-        # galaxy sample
-        sample_fnames = mpp.utility.grep(os.listdir(dirname), 'json')
-        for fname in sample_fnames:
-            if fname != 'cosmology.json':
-                print(os.path.join(dirname, fname))
-                info = json.load(open(os.path.join(dirname, fname)) , object_pairs_hook=od)
-                if info['sample_type'] == 'lens':
-                    sample = galaxy_sample_lens_class(info)
-                elif info['sample_type'] == 'source':
-                    sample = galaxy_sample_source_class(info)
-                self.set_galaxy_sample(sample)
-        # cosmology
-        fname = os.path.join(dirname, 'cosmology.json')
-        cosmo_dict = json.load(open(fname, 'r'), object_pairs_hook=od)
-        self.set_cosmology_from_dict(cosmo_dict)
-        # P2D
-        names = self.get_galaxy_sample_names()
-        for name1 in names:
-            for name2 in names:
-                key = self.P2Dcache_sep.join([name1, name2])
-                fname = os.path.join(dirname, key+'.txt')
-                print(f'loading {key}')
-                d = np.loadtxt(fname)
-                self.P2Dcache[key] = {'l':d[:, 0], 'P2D':d[:,1]}
-                
-    def getP2D(self, name1, name2, include_shot_nosise=True):
-        key = self.P2Dcache_sep.join([name1, name2])
-        P2D = self.P2Dcache[key]
-        l = P2D['l']
-        ans = P2D['P2D']
-        if include_shot_nosise and name1 == name2:
-            sample = self.galaxy_sample_dict[name1]
-            if sample.info['sample_type'] == 'lens':
-                ans += 1.0/sample.info['n2d']
-            elif sample.info['sample_type'] == 'source':
-                ans += sample.info['sigma_shape']**2/sample.info['n2d']/2.0 # ? 
-        return l, ans
-    
-def J0ave(k, rmin, rmax):
-    def i(kr):
-        return kr*jn(1,kr)
-    krmin, krmax = k*rmin, k*rmax
-    norm = (krmax**2-krmin**2)/2.0
-    ans = np.ones(k.shape)
-    sel = k > 0
-    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
-    return ans
-
-def J2ave(k, rmin, rmax):
-    def i(kr):
-        return -2*jn(0,kr) - kr*jn(1,kr)
-    krmin, krmax = k*rmin, k*rmax
-    norm = (krmax**2-krmin**2)/2.0
-    ans = np.zeros(k.shape)
-    sel = k > 0
-    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
-    return ans
-
-def J4ave(k, rmin, rmax):
-    def i(kr):
-        return (-8/kr+kr**2)*jn(1,kr) - 8*jn(2, kr)
-    krmin, krmax = k*rmin, k*rmax
-    norm = (krmax**2-krmin**2)/2.0
-    ans = np.zeros(k.shape)
-    sel = k > 0
-    ans[sel] = (i(krmax) - i(krmin))[sel]/norm[sel]
-    return ans
-
-class radial_bin_class:
-    def __init__(self, theta_bins=None):
-        self.set_theta_bin(theta_bins)
+    def load_Cl_cache(self, dirname):
+        self.Cl_cache = od()
+        # Cl
+        self.Cl_cache['Cl'] = od()
+        fnames = grep(os.listdir(dirname), '.txt')
+        for fname in fnames:
+            key = fname.replace('.txt','')
+            self.Cl_cache['Cl'][key] = np.loadtxt(os.path.join(dirname, fname))
+        # galaxy samples
         
-    def set_theta_bin(self, theta_bins):
-        self.theta_bins = theta_bins
+    def angular_correlation_function_fftlog(self, name1, name2, theta, probe, plot=False):
+        l = self.Cl_cache['Cl']['l']
+        Cl = self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ]
         
-    def set_theta_bin_from_min_max_num(self, tmin, tmax, num):
-        dlnt = np.log(tmax)-np.log(tmin)
-        self.theta_bins = []
-        for i in range(num):
-            self.theta_bins.append([ np.exp(np.log(tmin)+dlnt*i/num), np.exp(np.log(tmin)+dlnt*(i+1)/num) ])
-            
-    def theta_representative(self):
-        """
-        \bar{r} = \int rdr r / \int rdr = 2.0/3.0 * (rmax-rmin) 
-        """
-        t = []
-        for theta_bin in self.theta_bins:
-            _t = 2.0/3.0*(theta_bin[1]-theta_bin[0])
-            t.append(_t)
-        return np.array(t)
-
-
-probe_mu_dict = {'xi_plus':0, 'xi+':0, 'xi_minus':4, 'xi-':4, 'wp':0, 'gamma_t':2}
-class covariance_class:
-    def __init__(self, convolve2D):
-        self.convolve2D = convolve2D
+        logtmin, logtmax = np.log10(theta.min())-2, np.log10(theta.max())+2
+        print(logtmin, logtmax)
+        fftlog = dark_emulator.pyfftlog_interface.fftlog(logrmin=logtmin, logrmax=logtmax, num=8)
+        mu = self.probe_mu_dict[probe]
+        input_Cl = loginterp1d(l, Cl, fftlog.k)*fftlog.k
         
-    def get_covariance(self, names1, names2, t1, t2, probe1, probe2, dlnt1=None, dlnt2=None, method='fftlog'):
-        if method == 'fftlog':
-            return self.get_covariance_fftlog(names1, names2, t1, t2, probe1, probe2, dlnt1=None, dlnt2=None)
+        # more factors
+        if probe == 'wp':
+            Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
+            input_Cl *= Delta_chi_g
         
-    def get_covariance_fftlog(self, names1, names2, t1, t2, probe1, probe2, dlnt1=None, dlnt2=None):
-        l1, pl1 = self.convolve2D.getP2D(names1[0], names1[1], include_shot_nosise=True)
-        l2, pl2 = self.convolve2D.getP2D(names2[0], names2[1], include_shot_nosise=True)
-        p1, p2 = np.meshgrid(pl1*l1**1.5, pl2*l2**1.5)
-        input_pl = p1*p2
+        fftlog_out = fftlog.iHT(input_Cl, mu, 0.0, -1, 1.0/2.0/np.pi)
+        #acf = loginterp1d(fftlog.r, fftlog_out, theta)
+        acf = ius(fftlog.r, fftlog_out)(theta)
+        
+        if plot:
+            plt.figure()
+            plt.xlabel(r'$\theta$')
+            plt.ylabel(self.probe_latex_dict[probe])
+            plt.loglog(fftlog.r, fftlog_out, c='C0')
+            plt.loglog(fftlog.r,-fftlog_out, c='C0',ls='--')
+            plt.loglog(theta, acf, c='C1')
+            plt.loglog(theta,-acf, c='C1', ls='--')
+            plt.show()
+        return acf
+        
+    def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, dlnt1=None, dlnt2=None, plot=False):
+        l = self.Cl_cache['Cl']['l']
+        Cl1 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names1) ]
+        Cl2 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names2) ]
+        cl1, cl2 = np.meshgrid(Cl1*l**1.5, Cl2*l**1.5)
+        input_CCl3 = cl1*cl2
         nu = 1.01
-        tB = two_Bessel(l1, l2, input_pl, nu1=nu, nu2=nu, N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
-        mu1 = probe_mu_dict[probe1]
-        mu2 = probe_mu_dict[probe2]
+        tB = two_Bessel(l, l, input_CCl3, nu1=nu, nu2=nu, 
+                        N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
+        mu1 = self.probe_mu_dict[probe1]
+        mu2 = self.probe_mu_dict[probe2]
         if dlnt1 is None:
-            dlnt1 = np.log(t1[1]/t1[0])
+            dlnt1 = np.log(theta1[1]/theta1[0])
         if dlnt2 is None:
-            dlnt2 = np.log(t2[1]/t2[0])
+            dlnt2 = np.log(theta2[1]/theta2[0])
+        print(dlnt1, dlnt2)
         t1_fine, t2_fine, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
-        cov = interp2d(t1_fine, t2_fine, cov_fine)(t1, t2)
+        cov = interp2d(t1_fine, t2_fine, cov_fine)(theta1, theta2)
+        
+        if plot:
+            fig = plt.figure(figsize=(10, 8))
+            ax1 = fig.add_subplot(2,2,1)
+            ax1.imshow(cov)
+            ax1.set_title(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta_1)$'+
+                          self.probe_latex_dict[probe2]+r'$(\theta_2)$]')
+
+            ax2 = fig.add_subplot(2,2,2)
+            ax2.loglog(theta1, np.diag(cov))
+            ax2.set_xlabel(r'$\theta$')
+            ax2.set_ylabel(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta)$'+
+                           self.probe_latex_dict[probe2]+r'$(\theta)$]')
+            
+            ax3 = fig.add_subplot(2,2,3)
+            v = np.diag(cov)
+            v1, v2 = np.meshgrid(v,v)
+            cc = cov/(v1*v2)**0.5 # correlation coeff
+            ax3.imshow(cc)
+            ax3.set_title('correlation coefficients')
+
+            plt.tight_layout()
+            plt.show()
         return cov
         
-class signal_class:
-    def __init__(self, convolve2D):
-        self.convolve2D = convolve2D
-    
-    def get_signal_fftlog(self, name1, name2, t, probe):
-        tmin, tmax = np.min(t) / 1e3, np.max(t) * 1e3
-        lmin, lmax = 1/tmax, 1/tmin
-        print(np.log10(tmin), np.log10(tmax))
-        fftlog = dark_emulator.pyfftlog_interface.fftlog(logrmin=np.log10(tmin), logrmax=np.log10(tmax), num=8)
         
-        l, pl = self.convolve2D.getP2D(name1, name2, include_shot_nosise=False)
-        dlnl = np.log(l[1]/l[0])
-        N_small, N_large = np.log(l[0]/lmin)/dlnl*1.1, np.log(lmax/l[-1])/dlnl*1.1
-        l_extrap = log_extrap(l, N_small, N_large)
-        pl_extrap= log_extrap(pl,N_small, N_large)
-        input_pk = fftlog.k*ius(l_extrap, pl_extrap, ext=1)(fftlog.k)
-        mu = probe_mu_dict[probe]
-        ans = ius(fftlog.r, fftlog.iHT(input_pk, mu, 0.0, -1, 1.0/2.0/np.pi))(t)
-        return ans
+        
+        
+        
+        
+    
+    
+    
         
         
 # shape noise signa^2/n or sigma^2/2/n ?
