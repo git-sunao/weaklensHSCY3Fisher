@@ -28,6 +28,9 @@ from astropy import constants
 
 #H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
 H0 = 1e5 / constants.c.value # /(Mpc/h)
+deg2rad = np.pi/180.0
+arcmin2rad = 1/60.0 * deg2rad
+arcsec2rad = 1/60.0 * arcmin2rad
 
 #################################################
 #
@@ -419,6 +422,9 @@ class galaxy_sample_source_class(galaxy_base_class):
     
     def get_chi_source(self):
         return self.z2chi(self.info['z_source'])
+    
+    def get_shot_noise(self):
+        return self.info['sigma_shape']**2/self.info['n2d']
 
 class galaxy_sample_lens_class(galaxy_base_class):
     info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
@@ -443,6 +449,7 @@ class galaxy_sample_lens_class(galaxy_base_class):
         chi = self.z2chi(z)
         chi_lens_inv_ave = simps(1/chi, z)/(self.info['z_max']-self.info['z_min']) # = <\chi_l^{-1}>
         self.z_lens_eff = self.chi2z(chi_lens_inv_ave**-1)
+        self.cosmo_dict = cosmo_dict
     
     def window_galaxy(self, chi, z):
         return window_tophat(chi, z, self.info['z_min'], self.info['z_max'], self.z2chi)
@@ -465,7 +472,9 @@ class galaxy_sample_lens_class(galaxy_base_class):
     
     def get_Delta_chi_g(self):
         return self.get_Delta_chi()
-        
+    
+    def get_shot_noise(self):
+        return 1.0/self.info['n2d']
 
 #######################################
 #
@@ -722,13 +731,24 @@ class pk2cl_class:
             self.Cl_cache['Cl'][key] = np.loadtxt(os.path.join(dirname, fname))
         # galaxy samples
         
-    def angular_correlation_function_fftlog(self, name1, name2, theta, probe, binave=False, dlnt=None, plot=False, plot_with=None):
-        l = self.Cl_cache['Cl']['l']
+    def get_lCl_from_cache(self, name1, name2, include_shot_noise=False):
+        l = copy.deepcopy(self.Cl_cache['Cl']['l'])
         Cl = copy.deepcopy(self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ])
-        # more factors
-        if probe == 'wp':
-            Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
-            Cl *= Delta_chi_g
+        
+        # more factors for wp and dSigma to be in physical scale
+        #if probe == 'wp':
+        #    Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
+        #    Cl *= Delta_chi_g
+        
+        # shot noise term
+        if include_shot_noise and name1 == name2:
+            sample = self.galaxy_sample_dict[name1]
+            shot_noise = sample.get_shot_noise()
+            Cl += shot_noise
+        return l, Cl
+        
+    def angular_correlation_function_fftlog(self, name1, name2, theta, probe, binave=False, dlnt=None, plot=False, plot_with=None):
+        l, Cl = self.get_lCl_from_cache(name1, name2)
         
         logtmin, logtmax = np.log10(theta.min())-2, np.log10(theta.max())+2
         print(logtmin, logtmax)
@@ -760,12 +780,7 @@ class pk2cl_class:
         return acf
     
     def angular_correlation_function_bruteforce(self, name1, name2, theta, probe, binave=False, dlnt=None, plot=False):
-        l = self.Cl_cache['Cl']['l']
-        Cl = copy.deepcopy(self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ])
-        # more factors
-        if probe == 'wp':
-            Delta_chi_g = self.galaxy_sample_dict[name1].get_Delta_chi_g()
-            Cl *= Delta_chi_g
+        l, Cl = self.get_lCl_from_cache(name1, name2)
 
         if binave and dlnt is None:
             dlnt = np.log(theta[1]/theta[0])
@@ -773,7 +788,7 @@ class pk2cl_class:
         mu = self.probe_mu_dict[probe]
 
         def helper(t):
-            dump = np.exp(-(l*t)**2/(30*np.pi)**2)
+            dump = np.exp(-(l*t)**2/(50*np.pi)**2)
             if binave:
                 j = jn_binave(mu, l, t, t*np.exp(dlnt))
             else:
@@ -785,16 +800,13 @@ class pk2cl_class:
         return acf
         
     def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
-        """
-        
-        """
-        l = self.Cl_cache['Cl']['l']
-        Cl1 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names1) ]
-        Cl2 = self.Cl_cache['Cl'][ self.Cl_names_sep.join(names2) ]
-        cl1, cl2 = np.meshgrid(Cl1*l**1.5, Cl2*l**1.5)
-        input_CCl3 = cl1*cl2
+        l, Cl1 = self.get_lCl_from_cache(names1[0], names1[1], include_shot_noise=True)
+        l, Cl2 = self.get_lCl_from_cache(names2[0], names2[1], include_shot_noise=True)
+        Omega_s = 1 #########################################################################
+        dlnl = np.log(l[1]/l[0])
+        input_f = np.diag(Cl1*Cl2*l**2)/Omega_s*(2.0*np.pi)/dlnl / (2.0*np.pi)**2
         nu = 1.01
-        tB = two_Bessel(l, l, input_CCl3, nu1=nu, nu2=nu, 
+        tB = two_Bessel(l, l, input_f, nu1=nu, nu2=nu, 
                         N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
         mu1 = self.probe_mu_dict[probe1]
         mu2 = self.probe_mu_dict[probe2]
@@ -815,32 +827,89 @@ class pk2cl_class:
         if plot:
             fig = plt.figure(figsize=(10, 8))
             ax1 = fig.add_subplot(2,2,1)
-            ax1.imshow(cov)
-            ax1.set_title(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta_1)$'+
+            im1 = ax1.imshow(cov)
+            fig.colorbar(im1, ax=ax1)
+            ax1.set_title(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta_1)$,'+
                           self.probe_latex_dict[probe2]+r'$(\theta_2)$]')
 
             ax2 = fig.add_subplot(2,2,2)
+            ax2.loglog(t1_min, np.diag(cov_fine))
             ax2.loglog(theta1, np.diag(cov))
             ax2.set_xlabel(r'$\theta$')
-            ax2.set_ylabel(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta)$'+
+            ax2.set_ylabel(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta)$,'+
                            self.probe_latex_dict[probe2]+r'$(\theta)$]')
             
             ax3 = fig.add_subplot(2,2,3)
             v = np.diag(cov)
             v1, v2 = np.meshgrid(v,v)
             cc = cov/(v1*v2)**0.5 # correlation coeff
-            ax3.imshow(cc)
+            im3 = ax3.imshow(cc)
+            fig.colorbar(im3, ax=ax3)
             ax3.set_title('correlation coefficients')
 
             plt.tight_layout()
             plt.show()
         return cov
-        
     
+    def covariance_bruteforce(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
+        l, Cl1 = self.get_lCl_from_cache(names1[0], names1[1], include_shot_noise=True)
+        l, Cl2 = self.get_lCl_from_cache(names2[0], names2[1], include_shot_noise=True)
+        Omega_s = 1 #########################################################################
         
+        if binave and dlnt1 is None:
+            dlnt1 = np.log(theta1[1]/theta1[0])
+        if binave and dlnt2 is None:
+            dlnt2 = np.log(theta2[1]/theta2[0])
+        if not binave:
+            dlnt1, dlnt2 = 0, 0
+        print(dlnt1, dlnt2)
         
+        mu1 = self.probe_mu_dict[probe1]
+        mu2 = self.probe_mu_dict[probe2]
         
+        def helper(t1, t2):
+            f = l**2*Cl1*Cl2/2.0/np.pi/Omega_s
+            if binave:
+                jj = jn_binave(mu1, l, t1, t1*np.exp(dlnt1))*jn_binave(mu2, l, t2, t2*np.exp(dlnt2))
+            else:
+                jj = jn(mu1, l*t1)*jn(mu2, l*t2)
+            ans = simps(f*jj, np.log(l))
+            return ans
         
+        cov = []
+        for t1 in theta1:
+            _cov = []
+            for t2 in theta2:
+                _cov.append(helper(t1, t2))
+            cov.append(_cov)
+        cov = np.array(cov)
+        
+        if plot:
+            fig = plt.figure(figsize=(10, 8))
+            ax1 = fig.add_subplot(2,2,1)
+            im1 = ax1.imshow(cov)
+            fig.colorbar(im1, ax=ax1)
+            ax1.set_title(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta_1)$,'+
+                          self.probe_latex_dict[probe2]+r'$(\theta_2)$]')
+
+            ax2 = fig.add_subplot(2,2,2)
+            ax2.loglog(theta1, np.diag(cov))
+            ax2.set_xlabel(r'$\theta$')
+            ax2.set_ylabel(r'${\rm Cov}$['+self.probe_latex_dict[probe1]+r'$(\theta)$,'+
+                           self.probe_latex_dict[probe2]+r'$(\theta)$]')
+            
+            ax3 = fig.add_subplot(2,2,3)
+            v = np.diag(cov)
+            v1, v2 = np.meshgrid(v,v)
+            cc = cov/(v1*v2)**0.5 # correlation coeff
+            im3 = ax3.imshow(cc)
+            fig.colorbar(im3, ax=ax3)
+            ax3.set_title('correlation coefficients')
+
+            plt.tight_layout()
+            plt.show()
+        
+        return cov
     
       
 # shape noise signa^2/n or sigma^2/2/n ?
