@@ -14,8 +14,11 @@ from collections import OrderedDict as od
 try:
     from pyhalofit import pyhalofit
 except:
-    print('pyhalofit is not installed.')
-    print('Clone https://github.com/git-sunao/pyhalofit.')
+    try:
+        import pyhalofit
+    except:
+        print('pyhalofit is not installed.')
+        print('Clone https://github.com/git-sunao/pyhalofit.')
 from scipy.interpolate import InterpolatedUnivariateSpline as ius
 from scipy.interpolate import interp2d, interp1d
 from time import time
@@ -407,6 +410,18 @@ class galaxy_base_class:
         _z = np.linspace(0.0, 10.0, 100)
         _chi = self.z2chi(_z)
         return ius(_chi, _z)(chi)
+    
+    def get_shot_noise(self):
+        v, unit = self.info['n2d'].split(' ')[:2]
+        if 'arcmin^-2' in unit:
+            ns = float(v) / arcmin2rad**2
+        elif 'rad^-2' in unit:
+            ns = float(v)
+        elif 'deg^-2' in unit:
+            ns = float(v)/deg2rad**2
+        elif 'arcsec^-2' in unit:
+            ns = float(v)/arcsec2rad**2
+        return 1/ns
 
 class galaxy_sample_source_class(galaxy_base_class):
     info_keys = ['sample_name', 'z_source', 'sigma_shape', 'n2d']
@@ -424,8 +439,9 @@ class galaxy_sample_source_class(galaxy_base_class):
         return self.z2chi(self.info['z_source'])
     
     def get_shot_noise(self):
-        return self.info['sigma_shape']**2/self.info['n2d']
-
+        v = super().get_shot_noise()
+        return self.info['sigma_shape']**2*v
+    
 class galaxy_sample_lens_class(galaxy_base_class):
     info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
     sample_type = 'lens'
@@ -472,9 +488,6 @@ class galaxy_sample_lens_class(galaxy_base_class):
     
     def get_Delta_chi_g(self):
         return self.get_Delta_chi()
-    
-    def get_shot_noise(self):
-        return 1.0/self.info['n2d']
 
 #######################################
 #
@@ -486,8 +499,8 @@ class pk2cl_class:
     ::math::
         C(l) = P(l) = \int{\rm d}\chi W_1(\chi )W_2(\chi)P\left(\frac{l}{\chi}, z(\chi)\right)
     """
-    probe_mu_dict = {'xi_plus':0, 'xi+':0, 'xi_minus':4, 'xi-':4, 'wp':0, 'gamma_t':2}
-    probe_latex_dict = {'xi+':r'$\xi_+$', 'xi-':r'$\xi_-$', 'gamma_t':r'$\gamma_\mathrm{t}$', 'wp':r'$w_\mathrm{p}$'}
+    probe_mu_dict = {'xi+':0, 'xi-':4, 'w':0, 'gamma_t':2}
+    probe_latex_dict = {'xi+':r'$\xi_+$', 'xi-':r'$\xi_-$', 'gamma_t':r'$\gamma_\mathrm{t}$', 'w':r'$w$'}
     def __init__(self, pk_class=None):
         self.pk_class = pk_class
         self.galaxy_sample_dict = od()
@@ -504,6 +517,13 @@ class pk2cl_class:
         
     def get_galaxy_sample_names(self):
         return list(self.galaxy_sample_dict.keys())
+    
+    def set_Omega_s(self, Omega_s_dict):
+        """
+        At least, Omega_s for the keys 'w', 'gamma_t', 'xi' must be supplied.
+        Unit is deg^2
+        """
+        self.Omega_s = Omega_s_dict
         
     def set_cosmology_from_dict(self, cosmo_dict=None):
         if cosmo_dict is not None:
@@ -798,13 +818,34 @@ class pk2cl_class:
 
         acf = np.array([ helper(t) for t in theta])
         return acf
-        
+    
+    def _get_lClCl(self, names1, probe1, names2, probe2):
+        ClCl = 0
+        if probe1 == probe2 or (probe1=='xi+' and probe2=='xi-') or (probe1=='xi-' and probe2=='xi+'):
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=True)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=True)
+            ClCl += Cl1*Cl2
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=True)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=True)
+            ClCl += Cl1*Cl2
+        return l, ClCl
+    
+    def get_Omega_s(self, probe1, probe2):
+        if probe1 == 'w' and probe2 == 'w':
+            return self.Omega_s['w'] * deg2rad**2
+        elif probe1 == 'gamma_t' and probe2 == 'gamma_t':
+            return self.Omega_s['gamma_t'] * deg2rad**2
+        elif 'xi' in probe1 and 'xi' in probe2:
+            return self.Omega_s['xi'] * deg2rad**2
+        else:
+            print(f'No proper Omega_s is found for {probe1} and {probe2}. return 1.')
+            return 4.0*np.pi
+            
     def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
-        l, Cl1 = self.get_lCl_from_cache(names1[0], names1[1], include_shot_noise=True)
-        l, Cl2 = self.get_lCl_from_cache(names2[0], names2[1], include_shot_noise=True)
-        Omega_s = 1 #########################################################################
+        l, ClCl = self._get_lClCl(names1, probe1, names2, probe2)
+        Omega_s = self.get_Omega_s(probe1, probe2)
         dlnl = np.log(l[1]/l[0])
-        input_f = np.diag(Cl1*Cl2*l**2)/Omega_s*(2.0*np.pi)/dlnl / (2.0*np.pi)**2
+        input_f = np.diag(ClCl*l**2)/Omega_s*(2.0*np.pi)/dlnl / (2.0*np.pi)**2
         nu = 1.01
         tB = two_Bessel(l, l, input_f, nu1=nu, nu2=nu, 
                         N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
@@ -852,9 +893,8 @@ class pk2cl_class:
         return cov
     
     def covariance_bruteforce(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
-        l, Cl1 = self.get_lCl_from_cache(names1[0], names1[1], include_shot_noise=True)
-        l, Cl2 = self.get_lCl_from_cache(names2[0], names2[1], include_shot_noise=True)
-        Omega_s = 1 #########################################################################
+        l, ClCl = self._get_lClCl(names1, probe1, names2, probe2)
+        Omega_s = self.get_Omega_s(probe1, probe2)
         
         if binave and dlnt1 is None:
             dlnt1 = np.log(theta1[1]/theta1[0])
@@ -868,7 +908,7 @@ class pk2cl_class:
         mu2 = self.probe_mu_dict[probe2]
         
         def helper(t1, t2):
-            f = l**2*Cl1*Cl2/2.0/np.pi/Omega_s
+            f = l**2*ClCl/2.0/np.pi/Omega_s
             if binave:
                 jj = jn_binave(mu1, l, t1, t1*np.exp(dlnt1))*jn_binave(mu2, l, t2, t2*np.exp(dlnt2))
             else:
