@@ -101,7 +101,7 @@ def J2_binave(k, rmin, rmax):
 
 def J4_binave(k, rmin, rmax):
     def i(kr):
-        return (-8/kr+kr**2)*jn(1,kr) - 8*jn(2, kr)
+        return (-8/kr+kr)*jn(1,kr) - 8*jn(2, kr)
     krmin, krmax = k*rmin, k*rmax
     norm = (krmax**2-krmin**2)/2.0
     ans = np.zeros(k.shape)
@@ -359,9 +359,15 @@ def get_chirange_overlap(chirange1, chirange2):
         chi_min, chi_max = max([chirange1.min(), chirange2.min()]), min([chirange1.max(), chirange2.max()])
         return np.array([chi_min, chi_max])
     
-def get_chi_overlap(chirange1, chirange2, chi_bin):
+def get_chi_overlap(chirange1, chirange2, chi_bin, return_int_flag=False):
     cr = get_chirange_overlap(chirange1, chirange2)
-    return np.linspace(cr[0], cr[1], chi_bin)
+    if return_int_flag:
+        if np.all(cr>0):
+            return np.linspace(cr[0], cr[1], chi_bin), True
+        else:
+            return np.linspace(cr[0], cr[1], chi_bin), False
+    else:
+        return np.linspace(cr[0], cr[1], chi_bin)
 
 def get_chi_lensing(chirange1, chirange2, chi_bin, chi_min_max):
     cr = get_chirange_overlap(chirange1, chirange2)
@@ -422,28 +428,55 @@ class galaxy_base_class:
         elif 'arcsec^-2' in unit:
             ns = float(v)/arcsec2rad**2
         return 1/ns
+    
+    def dump(self, dirname):
+        fname = 'galaxy_sample_' + self.info['sample_name'] + '.json'
+        print(f'saved galaxy sample {self.info["sample_name"]} to {fname}')
+        info = copy.deepcopy(self.info)
+        info['sample_type'] = self.sample_type
+        json.dump(info, open(os.path.join(dirname, fname) ,'w'), indent=2)
+        
 
 class galaxy_sample_source_class(galaxy_base_class):
-    info_keys = ['sample_name', 'z_source', 'sigma_shape', 'n2d']
+    info_keys = ['sample_name', 'Pzs_fname', 'dzph', 'sigma_shape', 'n2d']
     sample_type = 'source'
     def __init__(self, info):
         super().__init__(info)
+        
+    def set_cosmology_from_dict(self, cosmo_dict):
+        super().set_cosmology_from_dict(cosmo_dict)
+        # chi_s
+        # 
+        # \int{\rm d}z_l P(z_l) \chi (\chi_s-\chi)/\chi_s = \chi (1 - \chi <\chi_s^{-1}> )
+        #
+        # where <\chi_s^{-1}> = \int{\rm d}z_s P(z_s) \chi_s^{-1}.
+        #
+        # We define z_source_eff as 
+        #
+        #  \chi(z_source_eff) = <\chi_s^{-1}>^{-1}
+        zs, Pzs = np.loadtxt(self.info['Pzs_fname'], unpack=True)
+        z = np.linspace(zs.min(), zs.max(), 100)
+        norm = simps(ius(zs, Pzs, ext=1)(z), z)
+        chi_s = self.z2chi(z)
+        chi_s_inv_ave = simps(ius(zs, Pzs, ext=1)(z+self.info['dzph']) * 1/chi_s, zs)/norm # = <\chi_s^{-1}>
+        self.z_source_eff = self.chi2z(chi_s_inv_ave**-1)
+        self.cosmo_dict = cosmo_dict
     
     def window_lensing(self, chi, z):
-        return window_lensing(chi, z, self.info['z_source'], self.cosmo_dict, self.z2chi)
+        return window_lensing(chi, z, self.z_source_eff, self.cosmo_dict, self.z2chi)
     
     def window_lensing_chirange(self):
-        return window_lensing_chirange(self.info['z_source'], self.z2chi)
+        return window_lensing_chirange(self.z_source_eff, self.z2chi)
     
     def get_chi_source(self):
-        return self.z2chi(self.info['z_source'])
+        return self.z2chi(self.z_source_eff)
     
     def get_shot_noise(self):
         v = super().get_shot_noise()
         return self.info['sigma_shape']**2*v
     
 class galaxy_sample_lens_class(galaxy_base_class):
-    info_keys = ['sample_name', 'z_lens', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
+    info_keys = ['sample_name', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
     sample_type = 'lens'
     def __init__(self, info):
         super().__init__(info)
@@ -480,7 +513,7 @@ class galaxy_sample_lens_class(galaxy_base_class):
         return window_lensing_chirange(self.z_lens_eff, self.z2chi)
     
     def get_chi_lens(self):
-        return self.z2chi(self.info['z_lens'])
+        return self.z2chi(self.z_lens_eff)
     
     def get_Delta_chi(self):
         cr = self.window_galaxy_chirange()
@@ -533,13 +566,16 @@ class pk2cl_class:
             self.galaxy_sample_dict[key].set_cosmology_from_dict(cosmo_dict)
         self.cosmo_dict = cosmo_dict
         
+    def get_cosmo_dict(self):
+        return copy.deepcopy(self.cosmo_dict)
+        
     def get_zmax_from_galaxy_samples(self):
         zmax = 0
         for key, sample in self.galaxy_sample_dict.items():
             if sample.sample_type == 'source':
-                _zmax = sample.info['z_source']
+                _zmax = sample.z_source_eff
             elif sample.sample_type == 'lens':
-                _zmax = sample.info['z_lens']
+                _zmax = sample.z_lens_eff
             if _zmax > zmax:
                 zmax = _zmax
         return zmax
@@ -558,12 +594,13 @@ class pk2cl_class:
         b1_1, b1_2 = sample1.info['galaxy_bias'], sample2.info['galaxy_bias']
         alpha_mag1, alpha_mag2 = sample1.info['alpha_mag'], sample2.info['alpha_mag']
         # g g
-        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window)
-        z = self.pk_class.get_z_from_chi(chi)
-        plchi = self.pk_class.get_pkgg_lchi(l, chi, b1_1, b1_2, model)
-        w1, w2 = sample1.window_galaxy(chi, z), sample2.window_galaxy(chi, z)
-        ans += simps(w1*w2*plchi/chi**2, chi)
-        if plot:
+        chi, int_flag = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window, return_int_flag=True)
+        if int_flag:
+            z = self.pk_class.get_z_from_chi(chi)
+            plchi = self.pk_class.get_pkgg_lchi(l, chi, b1_1, b1_2, model)
+            w1, w2 = sample1.window_galaxy(chi, z), sample2.window_galaxy(chi, z)
+            ans += simps(w1*w2*plchi/chi**2, chi)
+        if plot and int_flag:
             plt.figure()
             plt.xlabel(r'$\chi$')
             plt.yscale('log')
@@ -572,21 +609,23 @@ class pk2cl_class:
             plt.plot(chi, w1*w2*plchi.max()/chi**2)
             print(f'Cgg(l)                                ={ans}')
         # g mag
-        chi = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_magnification_chirange(), self.chi_bin_galaxy_window)
-        z = self.pk_class.get_z_from_chi(chi)
-        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_1, model)
-        w1, w2 = sample1.window_galaxy(chi, z), sample2.window_magnification(chi, z)
-        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag2-1)
-        if plot:
+        chi, int_flag = get_chi_overlap( sample1.window_galaxy_chirange(), sample2.window_magnification_chirange(), self.chi_bin_galaxy_window, return_int_flag=True)
+        if int_flag:
+            z = self.pk_class.get_z_from_chi(chi)
+            plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_1, model)
+            w1, w2 = sample1.window_galaxy(chi, z), sample2.window_magnification(chi, z)
+            ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag2-1)
+        if plot and int_flag:
             plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag2-1), label='g, mag')
             print(f'Cgg(l)+Cg,mag(l)                      ={ans}')
         # mag g
-        chi = get_chi_overlap( sample1.window_magnification_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window)
-        z = self.pk_class.get_z_from_chi(chi)
-        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_2, model)
-        w1, w2 = sample1.window_magnification(chi, z), sample2.window_galaxy(chi, z)
-        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1)
-        if plot:
+        chi, int_flag = get_chi_overlap( sample1.window_magnification_chirange(), sample2.window_galaxy_chirange(), self.chi_bin_galaxy_window, return_int_flag=True)
+        if int_flag:
+            z = self.pk_class.get_z_from_chi(chi)
+            plchi = self.pk_class.get_pkgm_lchi(l, chi, b1_2, model)
+            w1, w2 = sample1.window_magnification(chi, z), sample2.window_galaxy(chi, z)
+            ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha_mag1-1)
+        if plot and int_flag:
             plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha_mag1-1), label='mag, g')
             print(f'Cgg(l)+Cg,mag(l)+Cmag,g(l)            ={ans}')
         # mag mag
@@ -606,12 +645,13 @@ class pk2cl_class:
         ans = 0
         b1, alpha = sample_l.info['galaxy_bias'], sample_l.info['alpha_mag']
         # g E
-        chi = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), self.chi_bin_galaxy_window)
-        z = self.pk_class.get_z_from_chi(chi)
-        plchi = self.pk_class.get_pkgm_lchi(l, chi, b1, model)
-        w1, w2 = sample_l.window_galaxy(chi, z), sample_s.window_lensing(chi, z)
-        ans += simps(w1*w2*plchi/chi**2, chi)
-        if plot:
+        chi, int_flag = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), self.chi_bin_galaxy_window, return_int_flag=True)
+        if int_flag:
+            z = self.pk_class.get_z_from_chi(chi)
+            plchi = self.pk_class.get_pkgm_lchi(l, chi, b1, model)
+            w1, w2 = sample_l.window_galaxy(chi, z), sample_s.window_lensing(chi, z)
+            ans += simps(w1*w2*plchi/chi**2, chi)
+        if plot and int_flag:
             plt.figure()
             plt.yscale('log')
             plt.xscale('log') if plot_xlog else None
@@ -700,7 +740,7 @@ class pk2cl_class:
             if sample.sample_type == 'lens':
                 lens_samples = 0
     
-    def compute_all_Cl(self, l, model='nonlin'):
+    def compute_all_Cl(self, l, model='nonlin', compute_lens_cross=True):
         lens_samples   = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'lens']
         source_samples = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'source']
         
@@ -718,9 +758,13 @@ class pk2cl_class:
             else:
                 self.Cl_cache['Cl'][key] = func(name1, name2, l, model=model)
         # Cgg
-        for name1 in lens_samples:
-            for name2 in lens_samples:
-                helper(name1, name2, self.Cgg)
+        if compute_lens_cross:
+            for name1 in lens_samples:
+                for name2 in lens_samples:
+                    helper(name1, name2, self.Cgg)
+        else:
+            for name1 in lens_samples:
+                helper(name1, name1, self.Cgg)
         # CgE
         for name1 in lens_samples:
             for name2 in source_samples:
@@ -734,10 +778,19 @@ class pk2cl_class:
         if (not os.path.exists(dirname)) or overwrite:
             if not os.path.exists(dirname):
                 os.makedirs(dirname)
+            # Cl
             for key in self.Cl_cache['Cl'].keys():
                 fname = os.path.join(dirname, key+'.txt')
                 print(f'saving {key} to {fname}')
                 np.savetxt(fname, self.Cl_cache['Cl'][key])
+            # cosmo dict
+            print(f'saving cosmo_dict to {dirname}/cosmo_dict.json.')
+            json.dump(self.cosmo_dict, open(os.path.join(dirname, 'cosmo_dict.json'), 'w'), indent=2)
+            # galaxy samples
+            for k, sample in self.galaxy_sample_dict.items():
+                sample.dump(dirname)
+            # survey area
+            json.dump(self.Omega_s, open(os.path.join(dirname, 'Omega_s.json'), 'w'), indent=2)
         else:
             print(f'{dirname} already exists.')
             
@@ -749,7 +802,30 @@ class pk2cl_class:
         for fname in fnames:
             key = fname.replace('.txt','')
             self.Cl_cache['Cl'][key] = np.loadtxt(os.path.join(dirname, fname))
+        registered_key = list(self.Cl_cache['Cl'].keys())
+        for key in registered_key:
+            key_inv = self.Cl_names_sep.join(key.split(self.Cl_names_sep)[::-1])
+            if not key_inv in self.Cl_cache['Cl'].keys():
+                self.Cl_cache['Cl'][key_inv] = self.Cl_cache['Cl'][key]
         # galaxy samples
+        fnames = grep(os.listdir(dirname), 'galaxy_sample')
+        for fname in fnames:
+            info = json.load(open(os.path.join(dirname, fname), 'r'), object_pairs_hook=od)
+            #self._set_galaxy_info_from_dict(info)
+            sample_type = info.pop('sample_type')
+            if sample_type == 'lens':
+                gs = galaxy_sample_lens_class(info)
+            elif sample_type == 'source':
+                gs = galaxy_sample_source_class(info)
+            self.set_galaxy_sample(gs)
+        # cosmo_dict
+        cosmo_dict = json.load(open(os.path.join(dirname, 'cosmo_dict.json'), 'r'),
+                               object_pairs_hook=od)
+        self.set_cosmology_from_dict(cosmo_dict)
+        # survey area
+        Omega_s_dict = json.load(open(os.path.join(dirname, 'Omega_s.json'), 'r'), object_pairs_hook=od)
+        self.set_Omega_s(Omega_s_dict)
+        
         
     def get_lCl_from_cache(self, name1, name2, include_shot_noise=False):
         l = copy.deepcopy(self.Cl_cache['Cl']['l'])
@@ -819,14 +895,14 @@ class pk2cl_class:
         acf = np.array([ helper(t) for t in theta])
         return acf
     
-    def _get_lClCl(self, names1, probe1, names2, probe2):
+    def _get_lClCl(self, names1, probe1, names2, probe2, include_shot_noise=True):
         ClCl = 0
         if probe1 == probe2 or (probe1=='xi+' and probe2=='xi-') or (probe1=='xi-' and probe2=='xi+'):
-            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=True)
-            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=True)
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=include_shot_noise)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=include_shot_noise)
             ClCl += Cl1*Cl2
-            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=True)
-            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=True)
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[1], include_shot_noise=include_shot_noise)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[0], include_shot_noise=include_shot_noise)
             ClCl += Cl1*Cl2
         return l, ClCl
     
@@ -909,11 +985,12 @@ class pk2cl_class:
         
         def helper(t1, t2):
             f = l**2*ClCl/2.0/np.pi/Omega_s
+            dump = 1 #np.exp(-(l*t1)**2/(100*np.pi)**2 -(l*t2)**2/(100*np.pi)**2 )
             if binave:
                 jj = jn_binave(mu1, l, t1, t1*np.exp(dlnt1))*jn_binave(mu2, l, t2, t2*np.exp(dlnt2))
             else:
                 jj = jn(mu1, l*t1)*jn(mu2, l*t2)
-            ans = simps(f*jj, np.log(l))
+            ans = simps(f*jj*dump, np.log(l))
             return ans
         
         cov = []
