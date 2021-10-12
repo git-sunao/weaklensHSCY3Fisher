@@ -438,7 +438,7 @@ class galaxy_base_class:
         
 
 class galaxy_sample_source_class(galaxy_base_class):
-    info_keys = ['sample_name', 'Pzs_fname', 'dzph', 'sigma_shape', 'n2d']
+    info_keys = ['sample_name', 'Pzs_fname', 'dzph', 'dm', 'sigma_shape', 'n2d']
     sample_type = 'source'
     def __init__(self, info):
         super().__init__(info)
@@ -458,7 +458,7 @@ class galaxy_sample_source_class(galaxy_base_class):
         z = np.linspace(zs.min(), zs.max(), 100)
         norm = simps(ius(zs, Pzs, ext=1)(z), z)
         chi_s = self.z2chi(z)
-        chi_s_inv_ave = simps(ius(zs, Pzs, ext=1)(z+self.info['dzph']) * 1/chi_s, zs)/norm # = <\chi_s^{-1}>
+        chi_s_inv_ave = simps(ius(zs, Pzs, ext=1)(z+self.info['dzph']) * 1/chi_s, z)/norm # = <\chi_s^{-1}>
         self.z_source_eff = self.chi2z(chi_s_inv_ave**-1)
         self.cosmo_dict = cosmo_dict
     
@@ -644,13 +644,14 @@ class pk2cl_class:
     def _CgE(self, sample_l, sample_s, l, model='nonlin',plot=False, plot_xlog=False):
         ans = 0
         b1, alpha = sample_l.info['galaxy_bias'], sample_l.info['alpha_mag']
+        m = 1.0 + sample_s.info['dm']
         # g E
         chi, int_flag = get_chi_overlap( sample_l.window_galaxy_chirange(), sample_s.window_lensing_chirange(), self.chi_bin_galaxy_window, return_int_flag=True)
         if int_flag:
             z = self.pk_class.get_z_from_chi(chi)
             plchi = self.pk_class.get_pkgm_lchi(l, chi, b1, model)
             w1, w2 = sample_l.window_galaxy(chi, z), sample_s.window_lensing(chi, z)
-            ans += simps(w1*w2*plchi/chi**2, chi)
+            ans += simps(w1*w2*plchi/chi**2, chi)*m
         if plot and int_flag:
             plt.figure()
             plt.yscale('log')
@@ -662,19 +663,20 @@ class pk2cl_class:
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample_l.window_magnification(chi, z), sample_s.window_lensing(chi, z)
-        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha-1)
+        ans += simps(w1*w2*plchi/chi**2, chi) * 2*(alpha-1)*m
         if plot:
             plt.plot(chi, w1*w2*plchi/chi**2 * 2*(alpha-1))
         return ans
     
     def _CEE(self, sample1, sample2, l, model='nonlin', plot=False, plot_xlog=False):
         # EE
+        m1, m2 = 1.0+sample1.info['dm'], 1.0+sample2.info['dm']
         chi = get_chi_lensing( sample1.window_lensing_chirange(), sample2.window_lensing_chirange(), 
                               self.chi_bin_lens_kernel, l/self.k_peak/100.0)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample1.window_lensing(chi, z), sample2.window_lensing(chi, z)
-        ans = simps(w1*w2*plchi/chi**2, chi)
+        ans = simps(w1*w2*plchi/chi**2, chi)*m1*m2
         if plot:
             plt.figure()
             plt.yscale('log')
