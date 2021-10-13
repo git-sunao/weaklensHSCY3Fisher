@@ -116,6 +116,12 @@ def jn_binave(mu, k, rmin, rmax):
         return J2_binave(k, rmin, rmax)
     elif mu == 4.0:
         return J4_binave(k, rmin, rmax)
+    
+def correlation_coeff(cov):
+    v = np.diag(cov)
+    v1, v2 = np.meshgrid(v,v)
+    cc = cov/(v1*v2)**0.5
+    return cc
 
 #######################################
 #
@@ -325,7 +331,7 @@ def window_lensing(chi, z, z_source, cosmo_dict, z2chi):
     chi_source = z2chi(z_source)
     sel = chi < chi_source
     Omega_m = 1.0 - cosmo_dict['Omega_de']
-    ans[sel] = 3.0/2.0 * H0**2 * Omega_m / (1+z[sel]) * chi[sel]*(chi_source-chi[sel])/chi_source
+    ans[sel] = 3.0/2.0 * H0**2 * Omega_m * (1+z[sel]) * chi[sel]*(chi_source-chi[sel])/chi_source
     return ans
 
 def window_lensing_chirange(z_source, z2chi, r=0.01):
@@ -521,6 +527,7 @@ class galaxy_sample_lens_class(galaxy_base_class):
     
     def get_Delta_chi_g(self):
         return self.get_Delta_chi()
+    
 
 #######################################
 #
@@ -588,6 +595,9 @@ class pk2cl_class:
     
     def get_galaxy_sample(self, name):
         return self.galaxy_sample_dict[name]
+    
+    def get_all_galaxy_sample(self):
+        return self.galaxy_sample_dict.copy()
         
     def _Cgg(self, sample1, sample2, l, model='nonlin', plot=False, plot_xlog=False):
         ans = 0
@@ -849,7 +859,7 @@ class pk2cl_class:
         l, Cl = self.get_lCl_from_cache(name1, name2)
         
         logtmin, logtmax = np.log10(theta.min())-2, np.log10(theta.max())+2
-        print(logtmin, logtmax)
+        #print(logtmin, logtmax)
         fftlog = dark_emulator.pyfftlog_interface.fftlog(logrmin=logtmin, logrmax=logtmax, num=2)
         mu = self.probe_mu_dict[probe]
         input_Cl = loginterp1d(l, Cl, fftlog.k)*fftlog.k
@@ -919,7 +929,7 @@ class pk2cl_class:
             print(f'No proper Omega_s is found for {probe1} and {probe2}. return 1.')
             return 4.0*np.pi
             
-    def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
+    def covariance_fftlog(self, names1, probe1, theta1, names2, probe2, theta2, binave=True, dlnt1=None, dlnt2=None, plot=False):
         l, ClCl = self._get_lClCl(names1, probe1, names2, probe2)
         Omega_s = self.get_Omega_s(probe1, probe2)
         dlnl = np.log(l[1]/l[0])
@@ -935,7 +945,7 @@ class pk2cl_class:
             dlnt2 = np.log(theta2[1]/theta2[0])
         if not binave:
             dlnt1, dlnt2 = 0, 0
-        print(dlnt1, dlnt2)
+        #print(dlnt1, dlnt2)
         if binave:
             t1_min, t2_min, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
         else:
@@ -1029,6 +1039,156 @@ class pk2cl_class:
             plt.show()
         
         return cov
+    
+class radial_bin_class:
+    w_Rrange = [8.0, 80.0] #Mpc/h
+    w_tbin = 10
+    gamma_t_Rrange = [12.0, 80.0] # Mpc/h
+    gamma_tbin = 9
+    xip_trange = np.array([7, 56]) * arcmin2rad
+    xip_tbin = 8
+    xim_trange = np.array([28, 178]) * arcmin2rad
+    xim_tbin = 7
+    def __init__(self, galaxy_sample_dict):
+        self.galaxy_sample_dict = galaxy_sample_dict
+        self._init_theta()
+        
+    def _init_theta(self):
+        self.theta_dict = od()
+        names_l = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'lens']
+        names_s = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'source']
+        # galaxy clustering
+        self.theta_dict['w'] = od()
+        for name in names_l:
+            chi_l = self.galaxy_sample_dict[name].get_chi_lens()
+            tmin, tmax = self.w_Rrange[0]/chi_l, self.w_Rrange[1]/chi_l
+            t = np.logspace(np.log10(tmin), np.log10(tmax), self.w_tbin)
+            self.theta_dict['w'][','.join([name, name])] = t
+        # g-g lensing
+        self.theta_dict['gamma_t'] = od()
+        for n_s in names_s:
+            for n_l in names_l:
+                chi_l = self.galaxy_sample_dict[n_l].get_chi_lens()
+                tmin, tmax = self.gamma_t_Rrange[0]/chi_l, self.gamma_t_Rrange[1]/chi_l
+                t = np.logspace(np.log10(tmin), np.log10(tmax), self.gamma_tbin)
+                self.theta_dict['gamma_t'][','.join([n_l, n_s])] = t
+        # cosmic shear
+        combination = []
+        n = len(names_s)
+        for i in range(n):
+            for j in range(i+1):
+                combination.append(','.join([names_s[i], names_s[j]]))
+        # xi+
+        t = np.logspace(np.log10(self.xip_trange[0]), np.log10(self.xip_trange[1]), self.xip_tbin)
+        self.theta_dict['xi+'] = od()
+        for c in combination:
+            self.theta_dict['xi+'][c] = t
+        # xi-
+        t = np.logspace(np.log10(self.xim_trange[0]), np.log10(self.xim_trange[1]), self.xim_tbin)
+        self.theta_dict['xi-'] = od()
+        for c in combination:
+            self.theta_dict['xi-'][c] = t
+            
+        # init idx
+        end_idx = []
+        for probe in self.theta_dict.keys():
+            for name in self.theta_dict[probe].keys():
+                end_idx.append(len(self.theta_dict[probe][name]))
+        start_idx = np.hstack([0, np.cumsum(end_idx)[:-1]])
+        end_idx = np.cumsum(end_idx)
+        
+        self.end_idx, self.start_idx, i = od(), od(), 0
+        for probe in self.theta_dict.keys():
+            self.end_idx[probe], self.start_idx[probe] = od(), od()
+            for name in self.theta_dict[probe].keys():
+                self.end_idx[probe][name] = end_idx[i]
+                self.start_idx[probe][name] = start_idx[i]
+                i+= 1
+            
+    def get_theta(self, probe='all', name=''):
+        if probe == 'all':
+            theta = []
+            for p in self.theta_dict.keys():
+                for name in self.theta_dict[p].keys():
+                    theta.append(self.theta_dict[p][name])
+            return np.hstack(theta)
+        else:
+            return self.theta_dict[probe][name]
+
+class covariance_class:
+    def __init__(self, radial_bin):
+        self.radial_bin = radial_bin
+        self._init_covariance_matrix()
+        
+    def _init_covariance_matrix(self, ):
+        n = len(self.radial_bin.get_theta())
+        self.covariance = np.zeros((n,n))
+        
+    def set_covariance(self, probe1, name1, probe2, name2, submat):
+        s1 = self.radial_bin.start_idx[probe1][name1]
+        e1 = self.radial_bin.end_idx[probe1][name1]
+        s2 = self.radial_bin.start_idx[probe2][name2]
+        e2 = self.radial_bin.end_idx[probe2][name2]
+        self.covariance[s1:e1].T[s2:e2] = submat
+        self.covariance[s2:e2].T[s1:e1] = submat.T
+    
+    def get_covariance(self, probe1, name1, probe2, name2):
+        s1 = self.radial_bin.start_idx[probe1][name1]
+        e1 = self.radial_bin.end_idx[probe1][name1]
+        s2 = self.radial_bin.start_idx[probe2][name2]
+        e2 = self.radial_bin.end_idx[probe2][name2]
+        return self.covariance[s1:e1].T[s2:e2].T.copy()
+    
+    def get_full_covariance(self):
+        return self.covariance.copy()
+            
+    def set_covariance_from_pk2cl(self, pk2cl):
+        def append_subcov(probe1, names_list1, probe2, names_list2):
+            for names1 in names_list1:
+                t1 = self.radial_bin.get_theta(probe1, ','.join(names1))
+                for names2 in names_list2:
+                    t2 = self.radial_bin.get_theta(probe2, ','.join(names2))
+                    subcov = pk2cl.covariance_fftlog(names1, probe1, t1, names2, probe2, t2)
+                    self.set_covariance(probe1, ','.join(names1), probe2, ','.join(names2), subcov)
+        # auto covariance between same probe
+        for probe in self.radial_bin.theta_dict.keys():
+            names_list = [n.split(',') for n in self.radial_bin.theta_dict[probe].keys()]
+            append_subcov(probe, names_list, probe, names_list)
+        # cross covariance between different probes; here we only consider xi+, xi- covariance
+        names_list1 = [n.split(',') for n in self.radial_bin.theta_dict['xi+'].keys()]
+        names_list2 = [n.split(',') for n in self.radial_bin.theta_dict['xi-'].keys()]
+        append_subcov('xi+', names_list1, 'xi-', names_list2)
+        
+    
+class signal_class:
+    def __init__(self, radial_bin):
+        self.radial_bin = radial_bin
+        self._init_signal()
+        
+    def _init_signal(self):
+        n = len(self.radial_bin.get_theta())
+        self.signal = np.zeros(n)
+        
+    def set_signal(self, probe, name, subsig):
+        s = self.radial_bin.start_idx[probe][name]
+        e = self.radial_bin.end_idx[probe][name]
+        self.signal[s:e] = subsig
+        
+    def get_signal(self, probe='all', name=''):
+        if probe == 'all':
+            return self.signal.copy()
+        else:
+            s = self.radial_bin.start_idx[probe][name]
+            e = self.radial_bin.end_idx[probe][name]
+            return self.signal[s:e].copy()
+    
+    def set_signal_from_pk2cl(self, pk2cl):
+        for probe in self.radial_bin.theta_dict.keys():
+            for name in self.radial_bin.theta_dict[probe].keys():
+                names = name.split(',')
+                t = self.radial_bin.get_theta(probe, ','.join(names))
+                subsig = pk2cl.angular_correlation_function_fftlog(names[0], names[1], t, probe)
+                self.set_signal(probe, name, subsig)
     
       
 # shape noise signa^2/n or sigma^2/2/n ?

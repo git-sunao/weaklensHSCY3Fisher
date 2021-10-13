@@ -41,7 +41,7 @@ class two_sph_bessel(object):
 			self.N2 += N_extrap_low + N_extrap_high
 
 
-		print(self.N1, self.N2)
+		#print(self.N1, self.N2)
 		# zero-padding
 		self.N_pad = N_pad
 		if(N_pad):
@@ -79,8 +79,8 @@ class two_sph_bessel(object):
 		number of x1, x2 values should be even
 		c_window_width: the fraction of any row/column c_mn elements that are smoothed.
 		"""
-		print(self.fx1x2.shape)
-		print(self.x2.size, self.x1.size)
+		#print(self.fx1x2.shape)
+		#print(self.x2.size, self.x1.size)
 		f_b=((self.fx1x2*self.x2**(-self.nu2)).T*self.x1**(-self.nu1)).T
 		c_mn=rfft2(f_b)
 
