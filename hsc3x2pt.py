@@ -1190,6 +1190,52 @@ class signal_class:
                 subsig = pk2cl.angular_correlation_function_fftlog(names[0], names[1], t, probe)
                 self.set_signal(probe, name, subsig)
     
+
+################################################
+#
+# Fisher
+#
+def getFisherMat(dirname, power_b1):
+    pk2cl_fid = pk2cl_class(power_b1)
+    pk2cl_fid.load_Cl_cache(os.path.join(dirname, 'fiducial'))
+    
+    x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample())
+    
+    cov = covariance_class(x)
+    cov.set_covariance_from_pk2cl(pk2cl_fid)
+    c = cov.get_full_covariance()
+    cc = correlation_coeff(c)
+    ic = np.linalg.inv(c)
+    
+    y = signal_class(x)
+    y.set_signal_from_pk2cl(pk2cl_fid)
+    v_fid = y.get_signal()
+    
+    file_param = json.load(open(os.path.join(dirname, 'file_param.json'), 'r'), object_pairs_hook=od)
+
+    v_list = []
+    dvdp_list = []
+    y_dict = od()
+    for fname, dp in file_param.items():
+        pk2cl = pk2cl_class(power_b1)
+        pk2cl.load_Cl_cache(os.path.join(dirname, fname))
+        y.set_signal_from_pk2cl(pk2cl)
+        v = y.get_signal()
+        v_list.append(v)
+        y_dict[fname] = copy.deepcopy(y)
+        dvdp = (v-v_fid)/dp
+        dvdp_list.append(dvdp)
+    dvdp_list = np.array(dvdp_list)
+    
+    F = np.dot(dvdp_list, np.dot(ic, dvdp_list.T))
+    param_names = list(file_param.keys())
+    
+    y.set_signal_from_pk2cl(pk2cl_fid)
+    return x, y, y_dict, cov, param_names,F
+
+
+    
+
       
 # shape noise signa^2/n or sigma^2/2/n ?
 # binave implementation
