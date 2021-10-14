@@ -1052,15 +1052,16 @@ class pk2cl_class:
     
 class radial_bin_class:
     w_Rrange = [8.0, 80.0] #Mpc/h
-    w_tbin = 10
+    w_tbin = 14 # sugiyama Y1 gglens analysis
     gamma_t_Rrange = [12.0, 80.0] # Mpc/h
-    gamma_tbin = 9
+    gamma_tbin = 8 # sugiyama Y1 gglens analysis
     xip_trange = np.array([7, 56]) * arcmin2rad
-    xip_tbin = 8
+    xip_tbin = 9 # hamana Y1 CS analysis
     xim_trange = np.array([28, 178]) * arcmin2rad
-    xim_tbin = 7
-    def __init__(self, galaxy_sample_dict):
+    xim_tbin = 8 # hamana Y1 CS analysis
+    def __init__(self, galaxy_sample_dict, probes=['w', 'gamma_t', 'xi+', 'xi-']):
         self.galaxy_sample_dict = galaxy_sample_dict
+        self.probes = probes
         self._init_theta()
         
     def _init_theta(self):
@@ -1068,20 +1069,22 @@ class radial_bin_class:
         names_l = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'lens']
         names_s = [name for name, s in self.galaxy_sample_dict.items() if s.sample_type == 'source']
         # galaxy clustering
-        self.theta_dict['w'] = od()
-        for name in names_l:
-            chi_l = self.galaxy_sample_dict[name].get_chi_lens()
-            tmin, tmax = self.w_Rrange[0]/chi_l, self.w_Rrange[1]/chi_l
-            t = np.logspace(np.log10(tmin), np.log10(tmax), self.w_tbin)
-            self.theta_dict['w'][','.join([name, name])] = t
+        if 'w' in self.probes:
+            self.theta_dict['w'] = od()
+            for name in names_l:
+                chi_l = self.galaxy_sample_dict[name].get_chi_lens()
+                tmin, tmax = self.w_Rrange[0]/chi_l, self.w_Rrange[1]/chi_l
+                t = np.logspace(np.log10(tmin), np.log10(tmax), self.w_tbin)
+                self.theta_dict['w'][','.join([name, name])] = t
         # g-g lensing
-        self.theta_dict['gamma_t'] = od()
-        for n_s in names_s:
-            for n_l in names_l:
-                chi_l = self.galaxy_sample_dict[n_l].get_chi_lens()
-                tmin, tmax = self.gamma_t_Rrange[0]/chi_l, self.gamma_t_Rrange[1]/chi_l
-                t = np.logspace(np.log10(tmin), np.log10(tmax), self.gamma_tbin)
-                self.theta_dict['gamma_t'][','.join([n_l, n_s])] = t
+        if 'gamma_t' in self.probes:
+            self.theta_dict['gamma_t'] = od()
+            for n_s in names_s:
+                for n_l in names_l:
+                    chi_l = self.galaxy_sample_dict[n_l].get_chi_lens()
+                    tmin, tmax = self.gamma_t_Rrange[0]/chi_l, self.gamma_t_Rrange[1]/chi_l
+                    t = np.logspace(np.log10(tmin), np.log10(tmax), self.gamma_tbin)
+                    self.theta_dict['gamma_t'][','.join([n_l, n_s])] = t
         # cosmic shear
         combination = []
         n = len(names_s)
@@ -1089,15 +1092,17 @@ class radial_bin_class:
             for j in range(i+1):
                 combination.append(','.join([names_s[i], names_s[j]]))
         # xi+
-        t = np.logspace(np.log10(self.xip_trange[0]), np.log10(self.xip_trange[1]), self.xip_tbin)
-        self.theta_dict['xi+'] = od()
-        for c in combination:
-            self.theta_dict['xi+'][c] = t
+        if 'xi+' in self.probes:
+            t = np.logspace(np.log10(self.xip_trange[0]), np.log10(self.xip_trange[1]), self.xip_tbin)
+            self.theta_dict['xi+'] = od()
+            for c in combination:
+                self.theta_dict['xi+'][c] = t
         # xi-
-        t = np.logspace(np.log10(self.xim_trange[0]), np.log10(self.xim_trange[1]), self.xim_tbin)
-        self.theta_dict['xi-'] = od()
-        for c in combination:
-            self.theta_dict['xi-'][c] = t
+        if 'xi-' in self.probes:
+            t = np.logspace(np.log10(self.xim_trange[0]), np.log10(self.xim_trange[1]), self.xim_tbin)
+            self.theta_dict['xi-'] = od()
+            for c in combination:
+                self.theta_dict['xi-'][c] = t
             
         # init idx
         end_idx = []
@@ -1165,10 +1170,10 @@ class covariance_class:
             names_list = [n.split(',') for n in self.radial_bin.theta_dict[probe].keys()]
             append_subcov(probe, names_list, probe, names_list)
         # cross covariance between different probes; here we only consider xi+, xi- covariance
-        names_list1 = [n.split(',') for n in self.radial_bin.theta_dict['xi+'].keys()]
-        names_list2 = [n.split(',') for n in self.radial_bin.theta_dict['xi-'].keys()]
-        append_subcov('xi+', names_list1, 'xi-', names_list2)
-        
+        if 'xi+' in self.radial_bin.theta_dict.keys() and 'xi-' in self.radial_bin.theta_dict.keys():
+            names_list1 = [n.split(',') for n in self.radial_bin.theta_dict['xi+'].keys()]
+            names_list2 = [n.split(',') for n in self.radial_bin.theta_dict['xi-'].keys()]
+            append_subcov('xi+', names_list1, 'xi-', names_list2)
     
 class signal_class:
     def __init__(self, radial_bin):
@@ -1205,11 +1210,11 @@ class signal_class:
 #
 # Fisher
 #
-def getFisherMat(dirname, power):
+def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-']):
     pk2cl_fid = pk2cl_class(power)
     pk2cl_fid.load_Cl_cache(os.path.join(dirname, 'fiducial'))
     
-    x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample())
+    x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample(), probes=probes) # you can change the set of galaxy samples by changing the first argument of this function call.
     
     cov = covariance_class(x)
     cov.set_covariance_from_pk2cl(pk2cl_fid)
@@ -1221,12 +1226,18 @@ def getFisherMat(dirname, power):
     y.set_signal_from_pk2cl(pk2cl_fid)
     v_fid = y.get_signal()
     
+    print(f'cov.shape = {cc.shape}, dim(data)={v_fid.shape}')
+    
     file_param = json.load(open(os.path.join(dirname, 'file_param.json'), 'r'), object_pairs_hook=od)
 
     v_list = []
     dvdp_list = []
     y_dict = od()
+    param_names = []
     for fname, dp in file_param.items():
+        if ('b1' in fname and 'w' not in probes and 'gamma_t' not in probes) or ('alphamag' in fname and 'w' not in probes and 'gamma_t' not in probes):
+            print(f'skip {fname} because this is lens galaxy param, while probes does not include any lens related probe.')
+            continue
         pk2cl = pk2cl_class(power)
         pk2cl.load_Cl_cache(os.path.join(dirname, fname))
         y.set_signal_from_pk2cl(pk2cl)
@@ -1235,22 +1246,58 @@ def getFisherMat(dirname, power):
         y_dict[fname] = copy.deepcopy(y)
         dvdp = (v-v_fid)/dp
         dvdp_list.append(dvdp)
+        param_names.append(fname)
     dvdp_list = np.array(dvdp_list)
     
     F = np.dot(dvdp_list, np.dot(ic, dvdp_list.T))
-    param_names = list(file_param.keys())
+    
+    param_fid = np.loadtxt(os.path.join(dirname, 'param_fiducial.txt'))
     
     y.set_signal_from_pk2cl(pk2cl_fid)
-    return x, y, y_dict, cov, param_names,F
+    return x, y, y_dict, cov, param_names, param_fid, F
+
+names_labels_dict = {'omega_b':r'$\omega_\mathrm{b}$', 
+                     'omega_c':r'$\omega_\mathrm{c}$',
+                     'Omega_de':r'$\Omega_\mathrm{de}$',
+                     'sigma8':r'$\sigma_8$', 
+                     'ns':r'$n_\mathrm{s}$',
+                     'b1lowz':r'$b_\mathrm{1,LOWZ}$',
+                     'b1cmass1':r'$b_\mathrm{1,CMASS1}$',
+                     'b1cmass2':r'$b_\mathrm{1,CMASS2}$',
+                     'alphamaglowz':r'$\alpha_\mathrm{mag, LOWZ}$',
+                     'alphamagcmass1':r'$\alpha_\mathrm{mag, CMASS1}$',
+                     'alphamagcmass2':r'$\alpha_\mathrm{mag, CMASS2}$', 
+                     'dzph':r'$\Delta z_\mathrm{ph}$', 
+                     'dm':r'$\Delta m$', 
+                     'dzph1':r'$\Delta z_\mathrm{ph,1}$', 
+                     'dm1':r'$\Delta m_1$', 
+                     'dzph2':r'$\Delta z_\mathrm{ph,2}$', 
+                     'dm2':r'$\Delta m_2$'}
+
+def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label=''):
+    x,y,y_dict,cov, pnames, param_fid, F = getFisherMat(dirname, power, probes=probes)
+    fisher = Fisher_class(F, center=param_fid, names=pnames, label=label)
+    fisher.replace_labels(names_labels_dict)
+    return fisher
 
 class Fisher_class:
-    def __init__(self,F, center=None):
+    def __init__(self,F, center=None, names=None, labels=None, label=None):
         self.F = F
         self.n = F.shape[0]
+        
+        self.center = center
         if center is None:
             self.center = np.zeros(self.n)
-        else:
-            self.center = center
+        
+        self.names = names
+        if names is None:
+            self.names = [f'p{i}' for i in range(self.n)]
+        
+        self.labels = labels
+        if labels is None:
+            self.labels = self.names.copy()
+        
+        self.label = label
     
     def _sort(self, idx_front):
         idx = np.arange(self.n)
@@ -1259,6 +1306,11 @@ class Fisher_class:
         if len(idx) != self.n:
             print('something is wrong at _sort. idx=', idx)
         return self.F.copy()[idx,:].T[idx,:].T
+    
+    def replace_labels(self, names_labels_dict):
+        for name in self.names:
+            i = np.where(np.array(self.names)==name)[0][0]
+            self.labels[i]=names_labels_dict[name]
     
     def devideIntoSubMat(self, idx):
         n = len(idx)
@@ -1297,6 +1349,13 @@ class Fisher_class:
                 mu, sigma = self.center[i], self.get1DSigma(i)
                 ans.append(densityGauss(mu, sigma))
             return ans
+    
+    def get1DDensityFromName(self, name):
+        if name in self.names:
+            i = np.where(np.array(self.names)==name)[0][0]
+            return self.get1DDensity(i)
+        else:
+            return None
 
     def _get2DMagirnlizedFmat(self, i, j):
         F11, F12, F21, F22 = self.devideIntoSubMat([i,j])
@@ -1316,7 +1375,8 @@ class Fisher_class:
                 self.x = np.linspace(self.mu[0]-5*self.sigmas[0], self.mu[0]+5*self.sigmas[0], self.ngrid)
                 self.y = np.linspace(self.mu[1]-5*self.sigmas[1], self.mu[1]+5*self.sigmas[1], self.ngrid)
                 X, Y = np.meshgrid(self.x, self.y)
-                chi2 = X**2*self.mF[0,0] + 2*X*Y*self.mF[0,1] + Y**2*self.mF[1,1]
+                dX, dY = X-self.mu[0], Y-self.mu[1]
+                chi2 = dX**2*self.mF[0,0] + 2*dX*dY*self.mF[0,1] + dY**2*self.mF[1,1]
                 self.P = np.exp(-0.5*chi2)
         
         mu = self.center[[i,j]]
@@ -1324,15 +1384,105 @@ class Fisher_class:
         sigmas = [self.get1DSigma(i), self.get1DSigma(j)]
         return densityGauss2D(mu, mF, sigmas)
     
-    def _plot1d(self, i, color='k', xlabel=None, ax=None):
+    def get2DDensityFromName(self, name1, name2):
+        if name1 in self.names and name2 in self.names:
+            i = np.where(np.array(self.names)==name1)[0][0]
+            j = np.where(np.array(self.names)==name2)[0][0]
+            return self.get2DDensity(i, j)
+        else:
+            return None
+        
+    def getlabelFromName(self, name):
+        if name in self.names:
+            i = np.where(np.array(self.names)==name)[0][0]
+            return self.labels[i]
+        else:
+            return None
+        
+    def show1Sigma(self):
+        maxlen = max([len(name) for name in self.names])
+        for i, name in enumerate(self.names):
+            s = self.get1DSigma(i)
+            print(name.ljust(maxlen+1)+' -- '+f'{s}')
+
+class corner_class:
+    def __init__(self):
+        self.label_fontsize=8
+        
+    def _createCornerTemplate(self, n, figsize_ratio=1, label_fontsize=20):
+        fig = plt.figure(figsize=(n*figsize_ratio,n*figsize_ratio))
+        plt.subplots_adjust(hspace=0.0, wspace=0.0)
+        plt.rcParams['xtick.major.size'] = 5
+        plt.rcParams['ytick.major.size'] = 5
+        plt.rcParams['xtick.minor.size'] = 3
+        plt.rcParams['ytick.minor.size'] = 3
+        plt.rcParams['xtick.top'] = True
+        plt.rcParams['ytick.right'] = True
+        plt.rcParams['xtick.minor.visible'] = True
+        plt.rcParams['ytick.minor.visible'] = True
+        plt.rcParams['xtick.direction'] = 'in'
+        plt.rcParams['ytick.direction'] = 'in'
+        for i in range(n):
+            if i==0:
+                for j in range(i, n):
+                    if j==0:
+                        ax0 = fig.add_subplot(n,n,1+i+n*j)
+                        ax0.tick_params(axis='y', which='both', length=0)
+                        plt.setp(ax0.get_yticklabels(), visible=False)
+                        plt.setp(ax0.get_xticklabels(), visible=False)
+                    else:
+                        axn = fig.add_subplot(n,n,1+i+n*j, sharex=ax0)
+                        if j<n-1:
+                            plt.setp(axn.get_xticklabels(), visible=False)
+            else:
+                for j in range(i, n):
+                    if j==i:
+                        axd = fig.add_subplot(n,n,1+i+n*j)
+                        axd.tick_params(axis='y', which='both', length=0)
+                        plt.setp(axd.get_yticklabels(), visible=False)
+                        if j<n-1:
+                            plt.setp(axd.get_xticklabels(), visible=False)
+                    else:
+                        ax = fig.get_axes()[j]
+                        axn= fig.add_subplot(n,n,1+i+n*j, sharey=ax, sharex=axd)  
+                        plt.setp(axn.get_yticklabels(), visible=False)
+                        if j <n-1:
+                            plt.setp(axn.get_xticklabels(), visible=False)
+        for ax in fig.get_axes():
+            #plt.setp(ax.get_xticklabels(), visible=False)
+            ax.tick_params(direction='in')
+        
+        self.fig = fig
+        self.n_fig = n
+        
+    def _get_corner_ax(self, i, j=None):
+        idx_diag = i*self.n_fig - (i*(i-1))//2
+        if j is None:
+            return self.fig.get_axes()[idx_diag]
+        else:
+            return self.fig.get_axes()[idx_diag+j-i]
+    
+    def _set_corner_labels(self, labels, fontsize):
+        axes = self.fig.get_axes()
+        for i, label in enumerate(labels):
+            if i>0:
+                ax = axes[i]
+                ax.set_ylabel(label, fontsize=fontsize)
+            idx_diag = (i+1)*self.n_fig - (i*(i+1))//2
+            ax = axes[idx_diag-1]
+            ax.set_xlabel(label, fontsize=fontsize)
+        
+    def _plot1d(self, fisher, name, color='k', xlabel=None, ax=None, alpha=1.0):
         if ax is None:
             fig, ax = plt.subplots(1,1, figsize=(3,3))
         
-        d = self.get1DDensity(i)
-        ax.plot(d.x, d.P, color=color)
-        ax.set_xlabel(xlabel)
+        d = fisher.get1DDensityFromName(name)
+        if d is not None:
+            ax.plot(d.x, d.P, color=color, alpha=alpha, label=fisher.label)
+            if xlabel is not None:
+                ax.set_xlabel(xlabel)
         
-    def _plot2d(self, i, j, xlabel=None, ylabel=None, color='k', ax=None, fill=True):
+    def _plot2d(self, fisher, name1, name2, xlabel=None, ylabel=None, color='k', ax=None, fill=True, alpha=1.0):
         if ax is None:
             fig, ax = plt.subplots(1,1, figsize=(3,3))
         
@@ -1349,26 +1499,59 @@ class Fisher_class:
             levels.append(max(Psorted))
             return sorted(levels)
         
-        d = self.get2DDensity(i,j)
-        levels = get_levels(d.P)
-        pcolor = get_paler_colors(color, len(levels)-1)
-        ax.contour(d.x, d.y, d.P, levels=levels, colors=pcolor)
-        ax.contourf(d.x, d.y, d.P, levels=levels, colors=pcolor) if fill else None
-        #return d.x, d.y, d.P, levels
+        d = fisher.get2DDensityFromName(name1, name2)
+        if d is not None:
+            levels = get_levels(d.P)
+            pcolor = get_paler_colors(color, len(levels)-1)
+            ax.contour(d.x, d.y, d.P, levels=levels, colors=pcolor, alpha=alpha)
+            ax.contourf(d.x, d.y, d.P, levels=levels, colors=pcolor) if fill else None
         
-    def plot_corner(self, idx=None):
-        if idx is None:
-            idx = [i for i in range(self.n)]
+    def plot_corner(self, fishers, names=None, colors=None, figsize_ratio=1, fill2d=True, alpha2d=1.0, usetex=False):
+        if isinstance(fishers, Fisher_class):
+            fishers = [fishers]
             
+        if names is None:
+            names = fishers[0].names
+            
+        names_to_plot = []
+        labels_to_plot = []
+        for name in names:
+            included = False
+            for fisher in fishers:
+                if name in fisher.names:
+                    included = True
+                    names_to_plot.append(name)
+                    labels_to_plot.append(fisher.getlabelFromName(name))
+                    break
+                print(f'{name} is not included any fisher analysis. Omitting it.')
         
+        if colors is None:
+            colors = [f'C{i}' for i, f in enumerate(fishers)]
+            
+        plt.rc("text",usetex=usetex)
+        plt.rc("font",family="serif")
         
+        n = len(names_to_plot)
+        self._createCornerTemplate(n, figsize_ratio)
+        self._set_corner_labels(labels_to_plot, fontsize=self.label_fontsize*figsize_ratio)
         
+        for i, name in enumerate(names_to_plot):
+            ax = self._get_corner_ax(i)
+            ax.set_ylim((0.0, 1.1))
+            for fisher, color in zip(fishers, colors):
+                self._plot1d(fisher, name, color, None, ax)
         
+        for i, name1 in enumerate(names_to_plot):
+            for j, name2 in enumerate(names_to_plot):
+                if j>i:
+                    ax = self._get_corner_ax(i, j)
+                    for fisher, color in zip(fishers, colors):
+                        self._plot2d(fisher, name1, name2, None, None, color, ax, fill2d, alpha2d)
         
+        ax = self._get_corner_ax(0)
+        ax.legend(loc='upper left', bbox_to_anchor=(1,1))
         
-    
-        
-        
+        plt.rc("text",usetex=False)
 
 
 # shape noise signa^2/n or sigma^2/2/n ?
