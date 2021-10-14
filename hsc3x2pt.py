@@ -10,6 +10,7 @@ except:
 print('using dark_emulator at ', dark_emulator.__file__)
 import os, sys, json, copy
 import matplotlib.pyplot as plt
+import matplotlib
 from collections import OrderedDict as od
 try:
     from pyhalofit import pyhalofit
@@ -122,6 +123,15 @@ def correlation_coeff(cov):
     v1, v2 = np.meshgrid(v,v)
     cc = cov/(v1*v2)**0.5
     return cc
+
+def get_paler_colors(color, n_levels, pale_factor=None):
+    # convert a color into an array of colors for used in contours
+    color = matplotlib.colors.colorConverter.to_rgb(color)
+    pale_factor = pale_factor or 0.6
+    cols = [color]
+    for _ in range(1, n_levels):
+        cols = [[c * (1 - pale_factor) + pale_factor for c in cols[0]]] + cols
+    return cols
 
 #######################################
 #
@@ -1195,8 +1205,8 @@ class signal_class:
 #
 # Fisher
 #
-def getFisherMat(dirname, power_b1):
-    pk2cl_fid = pk2cl_class(power_b1)
+def getFisherMat(dirname, power):
+    pk2cl_fid = pk2cl_class(power)
     pk2cl_fid.load_Cl_cache(os.path.join(dirname, 'fiducial'))
     
     x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample())
@@ -1217,7 +1227,7 @@ def getFisherMat(dirname, power_b1):
     dvdp_list = []
     y_dict = od()
     for fname, dp in file_param.items():
-        pk2cl = pk2cl_class(power_b1)
+        pk2cl = pk2cl_class(power)
         pk2cl.load_Cl_cache(os.path.join(dirname, fname))
         y.set_signal_from_pk2cl(pk2cl)
         v = y.get_signal()
@@ -1233,10 +1243,134 @@ def getFisherMat(dirname, power_b1):
     y.set_signal_from_pk2cl(pk2cl_fid)
     return x, y, y_dict, cov, param_names,F
 
-
+class Fisher_class:
+    def __init__(self,F, center=None):
+        self.F = F
+        self.n = F.shape[0]
+        if center is None:
+            self.center = np.zeros(self.n)
+        else:
+            self.center = center
     
+    def _sort(self, idx_front):
+        idx = np.arange(self.n)
+        idx_back = np.delete(idx, idx_front)
+        idx = np.hstack([idx_front, idx_back])
+        if len(idx) != self.n:
+            print('something is wrong at _sort. idx=', idx)
+        return self.F.copy()[idx,:].T[idx,:].T
+    
+    def devideIntoSubMat(self, idx):
+        n = len(idx)
+        Fsorted = self._sort(idx)
+        F11 = Fsorted[:n,:].T[:n,:].T
+        F22 = Fsorted[n:,:].T[n:,:].T
+        F12 = Fsorted[:n, :].T[n:, :].T
+        F21 = Fsorted[n:, :].T[:n, :].T
+        return F11, F12, F21, F22
+        
+    def get1DSigma(self, idx):
+        F11, F12, F21, F22 = self.devideIntoSubMat([idx])
+        iF22 = np.linalg.inv(F22)
+        isigma2 = F11 - np.dot(F12, np.dot(iF22, F21))
+        sigma = 1.0/isigma2**0.5
+        return float(sigma)
+        
+    def get1DDensity(self, i=-1):
+        class densityGauss:
+            def __init__(self, mu, sigma, ngrid=1024):
+                self.mu = mu
+                self.sigma = sigma
+                self.ngrid = ngrid
+                self.set_density()
+            
+            def set_density(self):
+                self.x = np.linspace(self.mu-5*self.sigma, self.mu+5*self.sigma, self.ngrid)
+                self.P = np.exp(-0.5*(self.x-self.mu)**2/self.sigma**2)
+        
+        if i>-1:
+            mu, sigma = self.center[i], self.get1DSigma(i)
+            return densityGauss(mu, sigma)
+        else:
+            ans = []
+            for i in range(self.n):
+                mu, sigma = self.center[i], self.get1DSigma(i)
+                ans.append(densityGauss(mu, sigma))
+            return ans
 
-      
+    def _get2DMagirnlizedFmat(self, i, j):
+        F11, F12, F21, F22 = self.devideIntoSubMat([i,j])
+        iF22 = np.linalg.inv(F22)
+        return F11 - np.dot(F12, np.dot(iF22, F21))
+            
+    def get2DDensity(self, i, j):
+        class densityGauss2D:
+            def __init__(self, mu, mF, sigmas, ngrid=256):
+                self.mu = mu
+                self.mF = mF # maginal F
+                self.sigmas = sigmas
+                self.ngrid = ngrid
+                self.set_density()
+            
+            def set_density(self):
+                self.x = np.linspace(self.mu[0]-5*self.sigmas[0], self.mu[0]+5*self.sigmas[0], self.ngrid)
+                self.y = np.linspace(self.mu[1]-5*self.sigmas[1], self.mu[1]+5*self.sigmas[1], self.ngrid)
+                X, Y = np.meshgrid(self.x, self.y)
+                chi2 = X**2*self.mF[0,0] + 2*X*Y*self.mF[0,1] + Y**2*self.mF[1,1]
+                self.P = np.exp(-0.5*chi2)
+        
+        mu = self.center[[i,j]]
+        mF = self._get2DMagirnlizedFmat(i,j)
+        sigmas = [self.get1DSigma(i), self.get1DSigma(j)]
+        return densityGauss2D(mu, mF, sigmas)
+    
+    def _plot1d(self, i, color='k', xlabel=None, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots(1,1, figsize=(3,3))
+        
+        d = self.get1DDensity(i)
+        ax.plot(d.x, d.P, color=color)
+        ax.set_xlabel(xlabel)
+        
+    def _plot2d(self, i, j, xlabel=None, ylabel=None, color='k', ax=None, fill=True):
+        if ax is None:
+            fig, ax = plt.subplots(1,1, figsize=(3,3))
+        
+        def get_levels(P, alphas=[0.68, 0.95]):
+            P1d = P.reshape(-1)
+            Psorted = np.array(sorted(P1d))[::-1] # larger is smaller idx.
+            norm = np.sum(P)
+            cumsum = np.cumsum(Psorted)/norm
+            
+            levels = []
+            for alpha in alphas:
+                l = np.min(Psorted[cumsum<=alpha])
+                levels.append(l)
+            levels.append(max(Psorted))
+            return sorted(levels)
+        
+        d = self.get2DDensity(i,j)
+        levels = get_levels(d.P)
+        pcolor = get_paler_colors(color, len(levels)-1)
+        ax.contour(d.x, d.y, d.P, levels=levels, colors=pcolor)
+        ax.contourf(d.x, d.y, d.P, levels=levels, colors=pcolor) if fill else None
+        #return d.x, d.y, d.P, levels
+        
+    def plot_corner(self, idx=None):
+        if idx is None:
+            idx = [i for i in range(self.n)]
+            
+        
+        
+        
+        
+        
+        
+    
+        
+        
+
+
 # shape noise signa^2/n or sigma^2/2/n ?
 # binave implementation
 # 
