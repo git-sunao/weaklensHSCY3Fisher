@@ -29,6 +29,7 @@ from scipy.special import jn
 from twobessel import two_Bessel
 from twobessel import log_extrap
 from astropy import constants
+from pandas import DataFrame
 
 #H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
 H0 = 1e5 / constants.c.value # /(Mpc/h)
@@ -132,6 +133,24 @@ def get_paler_colors(color, n_levels, pale_factor=None):
     for _ in range(1, n_levels):
         cols = [[c * (1 - pale_factor) + pale_factor for c in cols[0]]] + cols
     return cols
+
+#######################################
+class chain_reader_class:
+    def __init__(self):
+        pass
+    
+    def getHSCY12x2ptSugiyama(self, label=None):
+        from getdist import MCSamples
+        d = np.loadtxt('./chains/chain_sugiyama.txt', usecols=(0,2,3,4,5,7,8,9,10,11,12, 13,14,16))
+        weights = d[:,0]
+        chain = d[:,1:]
+        pnames = ['omega_b', 'omega_c', 'Omega_de', 'ns', 
+                 'b1lowz', 'b1cmass1', 'b1cmass2', 'dm', 'dpz', 
+                 'alphamaglowz', 'alphamagcmass1', 'alphamagcmass2', 'sigma8']
+        if label is None:
+            label = 'HSC Y1 2x2pt (Sugiyama et al)'
+        samples = MCSamples(samples=chain, weights=weights, names=pnames, label=label)
+        return samples
 
 #######################################
 #
@@ -1311,6 +1330,83 @@ class Fisher_class:
             self.labels = self.names.copy()
         
         self.label = label
+        
+    def __add__(self, other):
+        return self.joint(self, other)
+    
+    def __sub__(self, other):
+        return self.joint(self, other, factor2=-1)
+    
+    def joint(self, fisher1, fisher2, factor1=1, factor2=1):
+        names_new = np.unique(fisher1.names + fisher2.names)
+        n_new = len(names_new)
+        Fs = []
+        centers = []
+        for fisher, factor in zip([fisher1, fisher2], [factor1, factor2]):
+            idx_from = []
+            idx_to   = []
+            F_new = np.zeros((n_new,n_new))
+            center_new = np.zeros(n_new)
+            for i, name in enumerate(names_new):
+                if name in fisher.names:
+                    idx_from.append(fisher._idx_from_name(name))
+                    idx_to.append(i)
+            F_ref = fisher.devideIntoSubMat(idx_from)[0]
+            F_new[np.ix_(idx_to,idx_to)] += F_ref * factor
+            center_new[idx_to] += fisher.center[idx_from]
+            Fs.append(F_new)
+            centers.append(center_new)
+        F1, F2 = Fs
+        c1, c2 = centers
+        F12 = F1+F2
+        iF12 = np.linalg.inv(F12)
+        c12 = np.dot(iF12, np.dot(F1,c1)+np.dot(F2,c2))
+        
+        labels_new = []
+        for i, name in enumerate(names_new):
+            if name in fisher1.names:
+                label = fisher1.getlabelFromName(name)
+            elif name in fisher2.names:
+                label = fisher2.getlabelFromName(name)
+            else:
+                label = f'p{i}'
+            labels_new.append(label)
+        
+        label_new = ''
+        if factor1 > 0:
+            label_new += fisher1.label
+        else:
+            label_new += '-' + fisher1.label
+        if abs(factor1) != 1:
+            label_new += r'${}^{%.2f}$'%(abs(factor1))
+        if factor2 > 0:
+            label_new += ' + ' + fisher2.label
+        else:
+            label_new += ' - ' + fisher2.label
+        if abs(factor2) != 1:
+            label_new += r'${}^{%.2f}$'%(abs(factor2))
+        
+        return Fisher_class(F12, center=c12, names=names_new, labels=labels_new, label=label_new)
+    
+    def addPrior(self, sigmas, names, center=None, label=''):
+        F = []
+        if center is None:
+            center = self.center
+        for name in self.names:
+            if name in names:
+                i = np.where(np.array(names)==name)[0][0]
+                F.append(1/sigmas[i]**2)
+            else:
+                F.append(0.0)
+        F = np.diag(F)
+        fisher = Fisher_class(F, names=self.names, center=center, labels=self.labels, label=label)
+        return self.joint(self, fisher)
+    
+    def _idx_from_name(self, name):
+        if name in self.names:
+            return np.where(np.array(self.names)==name)[0][0]
+        else:
+            return None
     
     def _sort(self, idx_front):
         idx = np.arange(self.n)
@@ -1318,11 +1414,12 @@ class Fisher_class:
         idx = np.hstack([idx_front, idx_back])
         if len(idx) != self.n:
             print('something is wrong at _sort. idx=', idx)
-        return self.F.copy()[idx,:].T[idx,:].T
+        #return self.F.copy()[idx,:].T[idx,:].T
+        return self.F.copy()[np.ix_(idx, idx)]
     
     def replace_labels(self, names_labels_dict):
         for name in self.names:
-            i = np.where(np.array(self.names)==name)[0][0]
+            i = self._idx_from_name(name)
             self.labels[i]=names_labels_dict.get(name, self.labels[i])
     
     def devideIntoSubMat(self, idx):
@@ -1334,14 +1431,21 @@ class Fisher_class:
         F21 = Fsorted[n:, :].T[:n, :].T
         return F11, F12, F21, F22
         
-    def get1DSigma(self, idx):
+    def get1DSigmaFromIdx(self, idx):
         F11, F12, F21, F22 = self.devideIntoSubMat([idx])
         iF22 = np.linalg.inv(F22)
         isigma2 = F11 - np.dot(F12, np.dot(iF22, F21))
         sigma = 1.0/isigma2**0.5
         return float(sigma)
+    
+    def get1DSigma(self, name):
+        i = self._idx_from_name(name)
+        if i is None:
+            return -1
+        else:
+            return self.get1DSigmaFromIdx(i)
         
-    def get1DDensity(self, i=-1):
+    def get1DDensityFromIdx(self, i=-1):
         class densityGauss:
             def __init__(self, mu, sigma, ngrid=1024):
                 self.mu = mu
@@ -1354,19 +1458,19 @@ class Fisher_class:
                 self.P = np.exp(-0.5*(self.x-self.mu)**2/self.sigma**2)
         
         if i>-1:
-            mu, sigma = self.center[i], self.get1DSigma(i)
+            mu, sigma = self.center[i], self.get1DSigmaFromIdx(i)
             return densityGauss(mu, sigma)
         else:
             ans = []
             for i in range(self.n):
-                mu, sigma = self.center[i], self.get1DSigma(i)
+                mu, sigma = self.center[i], self.get1DSigmaFromIdx(i)
                 ans.append(densityGauss(mu, sigma))
             return ans
     
-    def get1DDensityFromName(self, name):
+    def get1DDensity(self, name):
         if name in self.names:
-            i = np.where(np.array(self.names)==name)[0][0]
-            return self.get1DDensity(i)
+            i = self._idx_from_name(name)
+            return self.get1DDensityFromIdx(i)
         else:
             return None
 
@@ -1375,7 +1479,7 @@ class Fisher_class:
         iF22 = np.linalg.inv(F22)
         return F11 - np.dot(F12, np.dot(iF22, F21))
             
-    def get2DDensity(self, i, j):
+    def get2DDensityFromIdx(self, i, j):
         class densityGauss2D:
             def __init__(self, mu, mF, sigmas, ngrid=256):
                 self.mu = mu
@@ -1394,29 +1498,66 @@ class Fisher_class:
         
         mu = self.center[[i,j]]
         mF = self._get2DMagirnlizedFmat(i,j)
-        sigmas = [self.get1DSigma(i), self.get1DSigma(j)]
+        sigmas = [self.get1DSigmaFromIdx(i), self.get1DSigmaFromIdx(j)]
         return densityGauss2D(mu, mF, sigmas)
     
-    def get2DDensityFromName(self, name1, name2):
+    def get2DDensity(self, name1, name2):
         if name1 in self.names and name2 in self.names:
             i = np.where(np.array(self.names)==name1)[0][0]
             j = np.where(np.array(self.names)==name2)[0][0]
-            return self.get2DDensity(i, j)
+            return self.get2DDensityFromIdx(i, j)
         else:
             return None
         
     def getlabelFromName(self, name):
         if name in self.names:
-            i = np.where(np.array(self.names)==name)[0][0]
+            i = self._idx_from_name(name)
             return self.labels[i]
         else:
             return None
         
     def show1Sigma(self):
         maxlen = max([len(name) for name in self.names])
-        for i, name in enumerate(self.names):
-            s = self.get1DSigma(i)
+        for name in self.names:
+            s = self.get1DSigma(name)
             print(name.ljust(maxlen+1)+' -- '+f'{s}')
+            
+def compare1Sigma(fishers, names=None):
+    if names is None:
+        names = []
+        for i, fisher in enumerate(fishers):
+            names += fisher.names
+        names = np.unique(names)
+
+    index = []
+    for fisher in fishers:
+        if fisher.label is None:
+            index.append(f'fisher-{i}')
+        else:
+            index.append(fisher.label)
+    
+    data = []
+    for fisher in fishers:
+        subdata = []
+        for name in names:
+            s = fisher.get1DSigma(name)
+            subdata.append('%.5f'%s)
+        data.append(subdata)
+        
+    columns = []
+    for name in names:
+        col = None
+        for fisher in fishers:
+            label = fisher.getlabelFromName(name)
+            if label is not None:
+                col = label
+        if col is not None:
+            columns.append(col)
+        else:
+            columns.append(name)
+    
+    return DataFrame(data, index=index, columns=columns)
+    
 
 class corner_class:
     def __init__(self):
@@ -1489,7 +1630,7 @@ class corner_class:
         if ax is None:
             fig, ax = plt.subplots(1,1, figsize=(3,3))
         
-        d = fisher.get1DDensityFromName(name)
+        d = fisher.get1DDensity(name)
         if d is not None:
             ax.plot(d.x, d.P, color=color, alpha=alpha, label=fisher.label)
             if xlabel is not None:
@@ -1506,13 +1647,13 @@ class corner_class:
             cumsum = np.cumsum(Psorted)/norm
             
             levels = []
-            for alpha in alphas:
-                l = np.min(Psorted[cumsum<=alpha])
+            for a in alphas:
+                l = np.min(Psorted[cumsum<=a])
                 levels.append(l)
             levels.append(max(Psorted))
             return sorted(levels)
         
-        d = fisher.get2DDensityFromName(name1, name2)
+        d = fisher.get2DDensity(name1, name2)
         if d is not None:
             levels = get_levels(d.P)
             pcolor = get_paler_colors(color, len(levels)-1)
@@ -1565,6 +1706,14 @@ class corner_class:
         ax.legend(loc='upper left', bbox_to_anchor=(1,1))
         
         plt.rc("text",usetex=False)
+        
+        class fig:
+            def __init__(self, fig):
+                self.fig = fig
+            def export(self, fname):
+                self.fig.savefig(fname, bbox_inches='tight')
+        
+        return fig(self.fig)
 
 
 # shape noise signa^2/n or sigma^2/2/n ?
