@@ -19,7 +19,7 @@ except:
         import pyhalofit
     except:
         print('pyhalofit is not installed.')
-        print('Clone https://github.com/git-sunao/pyhalofit.')
+        print('Clone https://github.com/git-sunao/pyhalofit .')
 from scipy.interpolate import InterpolatedUnivariateSpline as ius
 from scipy.interpolate import interp2d, interp1d
 from time import time
@@ -1210,9 +1210,11 @@ class signal_class:
 #
 # Fisher
 #
-def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-']):
+def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], Omega_s=None, zero_centering=False):
     pk2cl_fid = pk2cl_class(power)
     pk2cl_fid.load_Cl_cache(os.path.join(dirname, 'fiducial'))
+    if Omega_s is not None:
+        pk2cl_fid.Omega_s.update(Omega_s)
     
     x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample(), probes=probes) # you can change the set of galaxy samples by changing the first argument of this function call.
     
@@ -1234,7 +1236,13 @@ def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-']):
     dvdp_list = []
     y_dict = od()
     param_names = []
-    for fname, dp in file_param.items():
+    
+    if zero_centering or not os.path.exists(os.path.join(dirname, 'param_fiducial.txt')):
+        param_fid_all = np.zeros(v_fid.shape)
+    else:
+        param_fid_all = np.loadtxt(os.path.join(dirname, 'param_fiducial.txt'))
+    param_fid = []
+    for i, (fname, dp) in enumerate(file_param.items()):
         if ('b1' in fname and 'w' not in probes and 'gamma_t' not in probes) or ('alphamag' in fname and 'w' not in probes and 'gamma_t' not in probes):
             print(f'skip {fname} because this is lens galaxy param, while probes does not include any lens related probe.')
             continue
@@ -1247,11 +1255,12 @@ def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-']):
         dvdp = (v-v_fid)/dp
         dvdp_list.append(dvdp)
         param_names.append(fname)
+        param_fid.append(param_fid_all[i])
     dvdp_list = np.array(dvdp_list)
     
     F = np.dot(dvdp_list, np.dot(ic, dvdp_list.T))
     
-    param_fid = np.loadtxt(os.path.join(dirname, 'param_fiducial.txt'))
+    param_fid = np.array(param_fid)
     
     y.set_signal_from_pk2cl(pk2cl_fid)
     return x, y, y_dict, cov, param_names, param_fid, F
@@ -1272,10 +1281,14 @@ names_labels_dict = {'omega_b':r'$\omega_\mathrm{b}$',
                      'dzph1':r'$\Delta z_\mathrm{ph,1}$', 
                      'dm1':r'$\Delta m_1$', 
                      'dzph2':r'$\Delta z_\mathrm{ph,2}$', 
-                     'dm2':r'$\Delta m_2$'}
+                     'dm2':r'$\Delta m_2$', 
+                     'dzph3':r'$\Delta z_\mathrm{ph,3}$', 
+                     'dm3':r'$\Delta m_3$', 
+                     'dzph4':r'$\Delta z_\mathrm{ph,4}$', 
+                     'dm4':r'$\Delta m_4$'}
 
-def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label=''):
-    x,y,y_dict,cov, pnames, param_fid, F = getFisherMat(dirname, power, probes=probes)
+def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label='', Omega_s=None):
+    x,y,y_dict,cov, pnames, param_fid, F = getFisherMat(dirname, power, probes=probes, Omega_s=Omega_s)
     fisher = Fisher_class(F, center=param_fid, names=pnames, label=label)
     fisher.replace_labels(names_labels_dict)
     return fisher
@@ -1310,7 +1323,7 @@ class Fisher_class:
     def replace_labels(self, names_labels_dict):
         for name in self.names:
             i = np.where(np.array(self.names)==name)[0][0]
-            self.labels[i]=names_labels_dict[name]
+            self.labels[i]=names_labels_dict.get(name, self.labels[i])
     
     def devideIntoSubMat(self, idx):
         n = len(idx)
