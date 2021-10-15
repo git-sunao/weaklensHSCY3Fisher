@@ -1522,11 +1522,14 @@ class Fisher_class:
             s = self.get1DSigma(name)
             print(name.ljust(maxlen+1)+' -- '+f'{s}')
             
-def compare1Sigma(fishers, names=None):
+def compare1Sigma(fishers, names=None, sigma_scale=1):
+    if not isinstance(fishers, list):
+        fishers = [fishers]
+        
     if names is None:
         names = []
         for i, fisher in enumerate(fishers):
-            names += fisher.names
+            names += list(fisher.names)
         names = np.unique(names)
 
     index = []
@@ -1541,7 +1544,7 @@ def compare1Sigma(fishers, names=None):
         subdata = []
         for name in names:
             s = fisher.get1DSigma(name)
-            subdata.append('%.5f'%s)
+            subdata.append('%.5f'%(s*sigma_scale))
         data.append(subdata)
         
     columns = []
@@ -1699,8 +1702,8 @@ class corner_class:
             for j, name2 in enumerate(names_to_plot):
                 if j>i:
                     ax = self._get_corner_ax(i, j)
-                    for fisher, color in zip(fishers, colors):
-                        self._plot2d(fisher, name1, name2, None, None, color, ax, fill2d, alpha2d)
+                    for k, (fisher, color) in enumerate(zip(fishers, colors)):
+                        self._plot2d(fisher, name1, name2, None, None, color, ax, fill2d, alpha2d*0.6**k)
         
         ax = self._get_corner_ax(0)
         ax.legend(loc='upper left', bbox_to_anchor=(1,1))

@@ -1,9 +1,9 @@
 {
   "sample_name": "lowz",
   "z_min": 0.15,
-  "z_max": 0.35,
+  "z_max": 0.3,
   "galaxy_bias": 1.78,
-  "n2d": "40.36 arcmin^-2",
+  "n2d": "40.36e-4 arcmin^-2",
   "alpha_mag": 2.259,
   "sample_type": "lens"
 }

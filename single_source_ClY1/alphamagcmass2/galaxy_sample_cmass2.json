@@ -3,7 +3,7 @@
   "z_min": 0.55,
   "z_max": 0.7,
   "galaxy_bias": 2.28,
-  "n2d": "30.12 arcmin^-2",
+  "n2d": "30.12e-4 arcmin^-2",
   "alpha_mag": 3.76629,
   "sample_type": "lens"
 }
