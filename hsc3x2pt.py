@@ -145,7 +145,7 @@ class chain_reader_class:
         weights = d[:,0]
         chain = d[:,1:]
         pnames = ['omega_b', 'omega_c', 'Omega_de', 'ns', 
-                 'b1lowz', 'b1cmass1', 'b1cmass2', 'dm', 'dpz', 
+                 'b1lowz', 'b1cmass1', 'b1cmass2', 'dm', 'dzph', 
                  'alphamaglowz', 'alphamagcmass1', 'alphamagcmass2', 'sigma8']
         if label is None:
             label = 'HSC Y1 2x2pt (Sugiyama et al)'
@@ -815,25 +815,26 @@ class pk2cl_class:
             for name2 in source_samples:
                 helper(name1, name2, self.CEE)
                 
-    def dump_Cl_cache(self,dirname, overwrite=False):
-        if (not os.path.exists(dirname)) or overwrite:
-            if not os.path.exists(dirname):
-                os.makedirs(dirname)
-            # Cl
-            for key in self.Cl_cache['Cl'].keys():
-                fname = os.path.join(dirname, key+'.txt')
-                print(f'saving {key} to {fname}')
-                np.savetxt(fname, self.Cl_cache['Cl'][key])
-            # cosmo dict
-            print(f'saving cosmo_dict to {dirname}/cosmo_dict.json.')
-            json.dump(self.cosmo_dict, open(os.path.join(dirname, 'cosmo_dict.json'), 'w'), indent=2)
-            # galaxy samples
-            for k, sample in self.galaxy_sample_dict.items():
-                sample.dump(dirname)
-            # survey area
-            json.dump(self.Omega_s, open(os.path.join(dirname, 'Omega_s.json'), 'w'), indent=2)
-        else:
-            print(f'{dirname} already exists.')
+    def dump_Cl_cache(self,dirname, overwrite=False, silent=False):
+        with Silent(silent):
+            if (not os.path.exists(dirname)) or overwrite:
+                if not os.path.exists(dirname):
+                    os.makedirs(dirname)            
+                # Cl
+                for key in self.Cl_cache['Cl'].keys():
+                    fname = os.path.join(dirname, key+'.txt')
+                    print(f'saving {key} to {fname}')
+                    np.savetxt(fname, self.Cl_cache['Cl'][key])
+                # cosmo dict
+                print(f'saving cosmo_dict to {dirname}/cosmo_dict.json.')
+                json.dump(self.cosmo_dict, open(os.path.join(dirname, 'cosmo_dict.json'), 'w'), indent=2)
+                # galaxy samples
+                for k, sample in self.galaxy_sample_dict.items():
+                    sample.dump(dirname)
+                # survey area
+                json.dump(self.Omega_s, open(os.path.join(dirname, 'Omega_s.json'), 'w'), indent=2)
+            else:
+                print(f'{dirname} already exists.')
             
     def load_Cl_cache(self, dirname):
         self.Cl_cache = od()
@@ -1078,10 +1079,22 @@ class radial_bin_class:
     xip_tbin = 9 # hamana Y1 CS analysis
     xim_trange = np.array([28, 178]) * arcmin2rad
     xim_tbin = 8 # hamana Y1 CS analysis
-    def __init__(self, galaxy_sample_dict, probes=['w', 'gamma_t', 'xi+', 'xi-']):
+    def __init__(self, galaxy_sample_dict, probes=['w', 'gamma_t', 'xi+', 'xi-'], probe_names_dict_to_skip=None):
         self.galaxy_sample_dict = galaxy_sample_dict
         self.probes = probes
+        self.init_probe_names_dict_to_skip(probe_names_dict_to_skip)
         self._init_theta()
+            
+    def init_probe_names_dict_to_skip(self, probe_names_dict_to_skip):
+        if probe_names_dict_to_skip is None:
+            self.probe_names_dict_to_skip = {'w':[], 'gamma_t':[], 'xi+':[], 'xi-':[]}
+        else:
+            self.probe_names_dict_to_skip = od()
+            for key in probe_names_dict_to_skip.keys():
+                self.probe_names_dict_to_skip[key] = []
+                for names in probe_names_dict_to_skip[key]:
+                    self.probe_names_dict_to_skip[key].append(','.join(names))
+                    self.probe_names_dict_to_skip[key].append(','.join(names[::-1]))
         
     def _init_theta(self):
         self.theta_dict = od()
@@ -1091,6 +1104,8 @@ class radial_bin_class:
         if 'w' in self.probes:
             self.theta_dict['w'] = od()
             for name in names_l:
+                if ','.join([name, name]) in self.probe_names_dict_to_skip.get('w', []):
+                    continue
                 chi_l = self.galaxy_sample_dict[name].get_chi_lens()
                 tmin, tmax = self.w_Rrange[0]/chi_l, self.w_Rrange[1]/chi_l
                 t = np.logspace(np.log10(tmin), np.log10(tmax), self.w_tbin)
@@ -1100,6 +1115,8 @@ class radial_bin_class:
             self.theta_dict['gamma_t'] = od()
             for n_s in names_s:
                 for n_l in names_l:
+                    if ','.join([n_l, n_s]) in self.probe_names_dict_to_skip.get('gamma_t', []):
+                        continue
                     chi_l = self.galaxy_sample_dict[n_l].get_chi_lens()
                     tmin, tmax = self.gamma_t_Rrange[0]/chi_l, self.gamma_t_Rrange[1]/chi_l
                     t = np.logspace(np.log10(tmin), np.log10(tmax), self.gamma_tbin)
@@ -1115,12 +1132,16 @@ class radial_bin_class:
             t = np.logspace(np.log10(self.xip_trange[0]), np.log10(self.xip_trange[1]), self.xip_tbin)
             self.theta_dict['xi+'] = od()
             for c in combination:
+                if c in self.probe_names_dict_to_skip.get('xi+', []):
+                    continue
                 self.theta_dict['xi+'][c] = t
         # xi-
         if 'xi-' in self.probes:
             t = np.logspace(np.log10(self.xim_trange[0]), np.log10(self.xim_trange[1]), self.xim_tbin)
             self.theta_dict['xi-'] = od()
             for c in combination:
+                if c in self.probe_names_dict_to_skip.get('xi-', []):
+                    continue
                 self.theta_dict['xi-'][c] = t
             
         # init idx
@@ -1229,13 +1250,16 @@ class signal_class:
 #
 # Fisher
 #
-def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], Omega_s=None, zero_centering=False):
+def getFisherMat(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], 
+                 probe_names_dict_to_skip=None, Omega_s=None, zero_centering=False):
     pk2cl_fid = pk2cl_class(power)
     pk2cl_fid.load_Cl_cache(os.path.join(dirname, 'fiducial'))
     if Omega_s is not None:
         pk2cl_fid.Omega_s.update(Omega_s)
     
-    x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample(), probes=probes) # you can change the set of galaxy samples by changing the first argument of this function call.
+    x = radial_bin_class(pk2cl_fid.get_all_galaxy_sample(), # you can change the set of galaxy samples
+                         probes=probes, 
+                         probe_names_dict_to_skip=probe_names_dict_to_skip) 
     
     cov = covariance_class(x)
     cov.set_covariance_from_pk2cl(pk2cl_fid)
@@ -1306,8 +1330,10 @@ names_labels_dict = {'omega_b':r'$\omega_\mathrm{b}$',
                      'dzph4':r'$\Delta z_\mathrm{ph,4}$', 
                      'dm4':r'$\Delta m_4$'}
 
-def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label='', Omega_s=None):
-    x,y,y_dict,cov, pnames, param_fid, F = getFisherMat(dirname, power, probes=probes, Omega_s=Omega_s)
+def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label='', 
+              Omega_s=None, probe_names_dict_to_skip=None):
+    x,y,y_dict,cov, pnames, param_fid, F = getFisherMat(dirname, power, probes=probes, 
+                                                        Omega_s=Omega_s, probe_names_dict_to_skip=probe_names_dict_to_skip)
     fisher = Fisher_class(F, center=param_fid, names=pnames, label=label)
     fisher.replace_labels(names_labels_dict)
     return fisher
@@ -1565,6 +1591,7 @@ def compare1Sigma(fishers, names=None, sigma_scale=1):
 class corner_class:
     def __init__(self):
         self.label_fontsize=8
+        self.legend_fontsize=4
         
     def _createCornerTemplate(self, n, figsize_ratio=1, label_fontsize=20):
         fig = plt.figure(figsize=(n*figsize_ratio,n*figsize_ratio))
@@ -1706,7 +1733,7 @@ class corner_class:
                         self._plot2d(fisher, name1, name2, None, None, color, ax, fill2d, alpha2d*0.6**k)
         
         ax = self._get_corner_ax(0)
-        ax.legend(loc='upper left', bbox_to_anchor=(1,1))
+        ax.legend(loc='upper left', bbox_to_anchor=(1,1), fontsize=self.legend_fontsize*figsize_ratio)
         
         plt.rc("text",usetex=False)
         

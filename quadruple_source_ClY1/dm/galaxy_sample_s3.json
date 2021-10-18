@@ -1,9 +1,0 @@
-{
-  "sample_name": "s3",
-  "Pzs_fname": "sourcePzs_Y1/MLZs3.txt",
-  "dzph": 0.0,
-  "dm": 0.01,
-  "sigma_shape": 0.2,
-  "n2d": "4.37 arcmin^-2",
-  "sample_type": "source"
-}

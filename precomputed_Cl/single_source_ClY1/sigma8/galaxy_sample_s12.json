@@ -1,0 +1,9 @@
+{
+  "sample_name": "s12",
+  "Pzs_fname": "sourcePzs_Y1/MLZs34.txt",
+  "dzph": 0.0,
+  "dm": 0.0,
+  "sigma_shape": 0.4,
+  "n2d": "6.6 arcmin^-2",
+  "sample_type": "source"
+}
