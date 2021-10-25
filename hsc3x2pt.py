@@ -965,7 +965,7 @@ class pk2cl_class:
         dlnl = np.log(l[1]/l[0])
         input_f = np.diag(ClCl*l**2)/Omega_s*(2.0*np.pi)/dlnl / (2.0*np.pi)**2
         nu = 1.01
-        tB = two_Bessel(l, l, input_f, nu1=nu, nu2=nu, 
+        tB = two_Bessel(copy.deepcopy(l), copy.deepcopy(l), input_f, nu1=nu, nu2=nu, 
                         N_extrap_low=0, N_extrap_high=0, c_window_width=0.25, N_pad=0)
         mu1 = self.probe_mu_dict[probe1]
         mu2 = self.probe_mu_dict[probe2]
@@ -975,7 +975,6 @@ class pk2cl_class:
             dlnt2 = np.log(theta2[1]/theta2[0])
         if not binave:
             dlnt1, dlnt2 = 0, 0
-        #print(dlnt1, dlnt2)
         if binave:
             t1_min, t2_min, cov_fine = tB.two_Bessel_binave(mu1, mu2, dlnt1, dlnt2)
         else:
@@ -1010,7 +1009,7 @@ class pk2cl_class:
             plt.show()
         return cov
     
-    def covariance_bruteforce(self, names1, probe1, theta1, names2, probe2, theta2, binave=False, dlnt1=None, dlnt2=None, plot=False):
+    def covariance_bruteforce(self, names1, probe1, theta1, names2, probe2, theta2, binave=True, dlnt1=None, dlnt2=None, plot=False):
         l, ClCl = self._get_lClCl(names1, probe1, names2, probe2)
         Omega_s = self.get_Omega_s(probe1, probe2)
         
@@ -1020,7 +1019,6 @@ class pk2cl_class:
             dlnt2 = np.log(theta2[1]/theta2[0])
         if not binave:
             dlnt1, dlnt2 = 0, 0
-        print(dlnt1, dlnt2)
         
         mu1 = self.probe_mu_dict[probe1]
         mu2 = self.probe_mu_dict[probe2]
@@ -1036,9 +1034,9 @@ class pk2cl_class:
             return ans
         
         cov = []
-        for t1 in theta1:
+        for t2 in theta2:
             _cov = []
-            for t2 in theta2:
+            for t1 in theta1:
                 _cov.append(helper(t1, t2))
             cov.append(_cov)
         cov = np.array(cov)
@@ -1184,8 +1182,11 @@ class covariance_class:
         e1 = self.radial_bin.end_idx[probe1][name1]
         s2 = self.radial_bin.start_idx[probe2][name2]
         e2 = self.radial_bin.end_idx[probe2][name2]
-        self.covariance[s1:e1].T[s2:e2] = submat
-        self.covariance[s2:e2].T[s1:e1] = submat.T
+        if probe1 == probe2 and name1 == name2:
+            self.covariance[s1:e1].T[s2:e2] = 0.5*(submat + submat.T)
+        else:
+            self.covariance[s1:e1].T[s2:e2] = submat
+            self.covariance[s2:e2].T[s1:e1] = submat.T
     
     def get_covariance(self, probe1, name1, probe2, name2):
         s1 = self.radial_bin.start_idx[probe1][name1]
@@ -1196,7 +1197,7 @@ class covariance_class:
     
     def get_full_covariance(self):
         return self.covariance.copy()
-            
+        
     def set_covariance_from_pk2cl(self, pk2cl):
         def append_subcov(probe1, names_list1, probe2, names_list2):
             for names1 in names_list1:
@@ -1204,6 +1205,7 @@ class covariance_class:
                 for names2 in names_list2:
                     t2 = self.radial_bin.get_theta(probe2, ','.join(names2))
                     subcov = pk2cl.covariance_fftlog(names1, probe1, t1, names2, probe2, t2)
+                    #subcov = pk2cl.covariance_bruteforce(names1, probe1, t1, names2, probe2, t2)
                     self.set_covariance(probe1, ','.join(names1), probe2, ','.join(names2), subcov)
         # auto covariance between same probe
         for probe in self.radial_bin.theta_dict.keys():
@@ -1312,6 +1314,8 @@ names_labels_dict = {'omega_b':r'$\omega_\mathrm{b}$',
                      'omega_c':r'$\omega_\mathrm{c}$',
                      'Omega_de':r'$\Omega_\mathrm{de}$',
                      'sigma8':r'$\sigma_8$', 
+                     'S8':r'$S_8$',
+                     'S8opt':r'$S_8(\alpha^\mathrm{opt.})$',
                      'ns':r'$n_\mathrm{s}$',
                      'b1lowz':r'$b_\mathrm{1,LOWZ}$',
                      'b1cmass1':r'$b_\mathrm{1,CMASS1}$',
@@ -1466,10 +1470,24 @@ class Fisher_class:
     
     def get1DSigma(self, name):
         i = self._idx_from_name(name)
-        if i is None:
-            return -1
-        else:
+        if i is not None:
             return self.get1DSigmaFromIdx(i)
+        elif name == 'S8':
+            d = self.get1DDensity('S8')
+            args = np.argsort(d.P)[::-1]
+            cumsum = np.cumsum(d.P[args])/np.sum(d.P)
+            x = d.x[args][cumsum<0.68]
+            sigma = (max(x) - min(x)) / 2.0
+            return sigma
+        elif name == 'S8opt':
+            d = self.get1DDensity('S8opt')
+            args = np.argsort(d.P)[::-1]
+            cumsum = np.cumsum(d.P[args])/np.sum(d.P)
+            x = d.x[args][cumsum<0.68]
+            sigma = (max(x) - min(x)) / 2.0
+            return sigma
+        else:
+            return -1
         
     def get1DDensityFromIdx(self, i=-1):
         class densityGauss:
@@ -1497,6 +1515,22 @@ class Fisher_class:
         if name in self.names:
             i = self._idx_from_name(name)
             return self.get1DDensityFromIdx(i)
+        elif name == 'S8':
+            d = self._get2DDensityOdeS8()
+            P = np.sum(d.P, axis=1)
+            class densityS8:
+                def __init__(self, x, P):
+                    self.x = x
+                    self.P = P/np.max(P)
+            return densityS8(d.y, P)
+        elif name == 'S8opt':
+            d = self._get2DDensityOdeS8(optimize_alpha=True)
+            P = np.sum(d.P, axis=1)
+            class densityS8:
+                def __init__(self, x, P):
+                    self.x = x
+                    self.P = P/np.max(P)
+            return densityS8(d.y, P)
         else:
             return None
 
@@ -1532,13 +1566,118 @@ class Fisher_class:
             i = np.where(np.array(self.names)==name1)[0][0]
             j = np.where(np.array(self.names)==name2)[0][0]
             return self.get2DDensityFromIdx(i, j)
-        else:
+        elif name1 == 'Omega_de' and name2 == 'S8':
+            return self._get2DDensityOdeS8()
+        elif name1 == 'S8' and name2 == 'Omega_de':
+            d = self._get2DDensityOdeS8()
+            d.change_order()
+            return d
+        elif name1 == 'Omega_de' and name2 == 'S8opt':
+            return self._get2DDensityOdeS8(optimize_alpha=True)
+        elif name1 == 'S8opt' and name2 == 'Omega_de':
+            d = self._get2DDensityOdeS8(optimize_alpha=True)
+            d.change_order()
+            return d
+        elif name1 == 'sigma8' and name2 == 'S8':
+            return self._get2DDensitysigma8S8()
+        elif name1 == 'S8' and name2 == 'sigma8':
+            d = self._get2DDensitysigma8S8()
+            d.change_order()
+            return d
+        elif name1 == 'sigma8' and name2 == 'S8opt':
+            return self._get2DDensitysigma8S8(optimize_alpha=True)
+        elif name1 == 'S8opt' and name2 == 'sigma8':
+            d = self._get2DDensitysigma8S8(optimize_alpha=True)
+            d.change_order()
+            return d
+        else: 
             return None
+        
+    def optimize_S8alpha(self):
+        i = self._idx_from_name('sigma8')
+        j = self._idx_from_name('Omega_de')
+        sigma8, Omega_de = self.center[i], self.center[j]
+        F = self._get2DMagirnlizedFmat(i,j)
+        alpha_opt = -(1-Omega_de)/sigma8 * F[0,1]/F[0,0]
+        print(f'Optimizing alpha of S8 to {alpha_opt}')
+        return alpha_opt
+        
+    def _get2DDensityOdeS8(self, alpha=0.5, optimize_alpha=False):
+        class densityGauss2DOdeS8:
+            def __init__(self, mu, mF, sigmas, alpha=0.5, ngrid=256):
+                self.mu = [mu[0], mu[1]*((1.0-mu[0])/0.3)**alpha] # Ode and S8
+                self.mF = mF # maginal F
+                self.sigmas = sigmas
+                self.ngrid = ngrid
+                self.alpha = alpha
+                self.mu_sigma8 = mu[1]
+                self.set_density()
+                self.order = ['Omega_de', 'S8']
+            
+            def set_density(self):
+                self.x = np.linspace(self.mu[0]-5*self.sigmas[0], np.min([self.mu[0]+5*self.sigmas[0], 1.0-1e-3]), self.ngrid)
+                self.y = np.linspace(self.mu[1]-5*self.sigmas[1], self.mu[1]+5*self.sigmas[1], self.ngrid)
+                X, Y = np.meshgrid(self.x, self.y)
+                dX, dY = X-self.mu[0], Y*((1.0-X)/0.3)**-self.alpha - self.mu_sigma8
+                chi2 = dX**2*self.mF[0,0] + 2*dX*dY*self.mF[0,1] + dY**2*self.mF[1,1]
+                self.P = np.exp(-0.5*chi2) * (1.0-X)**-self.alpha
+                self.P /= np.max(self.P)
+                
+            def change_order(self):
+                self.x, self.y = self.y, self.x
+                self.P = self.P.transpose()
+                
+        i = np.where(np.array(self.names)=='Omega_de')[0][0]
+        j = np.where(np.array(self.names)=='sigma8')[0][0]
+        mu = self.center[[i,j]]
+        mF = self._get2DMagirnlizedFmat(i,j)
+        sigmas = [self.get1DSigmaFromIdx(i), self.get1DSigmaFromIdx(j)]
+        if optimize_alpha:
+            alpha = self.optimize_S8alpha()
+        return densityGauss2DOdeS8(mu, mF, sigmas, alpha=alpha)
+    
+    def _get2DDensitysigma8S8(self, alpha=0.5, optimize_alpha=False):
+        class densityGauss2Dsigma8S8:
+            def __init__(self, mu, mF, sigmas, alpha=0.5, ngrid=256):
+                self.mu = [mu[0], mu[0]*((1.0-mu[1])/0.3)**alpha] # Ode and S8
+                self.mF = mF # maginal F
+                self.sigmas = sigmas
+                self.ngrid = ngrid
+                self.alpha = alpha
+                self.mu_Omega_de = mu[1]
+                self.set_density()
+                self.order = ['sigma8', 'S8']
+            
+            def set_density(self):
+                self.x = np.linspace(max([self.mu[0]-5*self.sigmas[0],1e-3]), self.mu[0]+5*self.sigmas[0], self.ngrid) # sigma8
+                self.y = np.linspace(self.mu[1]-5*self.sigmas[0], self.mu[1]+5*self.sigmas[0], self.ngrid) # S8
+                X, Y = np.meshgrid(self.x, self.y)
+                dX, dY = X-self.mu[0], 1.0 - 0.3*(Y/X)**(1/self.alpha) - self.mu_Omega_de
+                chi2 = dX**2*self.mF[0,0] + 2*dX*dY*self.mF[0,1] + dY**2*self.mF[1,1]
+                self.P = np.exp(-0.5*chi2) * 0.3/self.alpha * (Y/X)**(1.0/self.alpha-1.0)
+                self.P /= np.max(self.P)
+                
+            def change_order(self):
+                self.x, self.y = self.y, self.x
+                self.P = self.P.transpose()
+                
+        i = np.where(np.array(self.names)=='sigma8')[0][0]
+        j = np.where(np.array(self.names)=='Omega_de')[0][0]
+        mu = self.center[[i,j]]
+        mF = self._get2DMagirnlizedFmat(i,j)
+        sigmas = [self.get1DSigmaFromIdx(i), self.get1DSigmaFromIdx(j)]
+        if optimize_alpha:
+            alpha = self.optimize_S8alpha()
+        return densityGauss2Dsigma8S8(mu, mF, sigmas, alpha=alpha)
         
     def getlabelFromName(self, name):
         if name in self.names:
             i = self._idx_from_name(name)
             return self.labels[i]
+        elif name == 'S8':
+            return r'$S_8(0.5)$'
+        elif name == 'S8opt':
+            return r'$S_8(\alpha)$'
         else:
             return None
         
@@ -1702,7 +1841,7 @@ class corner_class:
         for name in names:
             included = False
             for fisher in fishers:
-                if name in fisher.names:
+                if name in fisher.names or name == 'S8' or name == 'S8opt':
                     included = True
                     names_to_plot.append(name)
                     labels_to_plot.append(fisher.getlabelFromName(name))

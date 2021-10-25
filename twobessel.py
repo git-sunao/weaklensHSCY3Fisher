@@ -161,7 +161,7 @@ class two_Bessel(object):
 		mat_right = mat[:,two_sph.N2//2:]
 		mat_adjust = np.vstack((mat_right[two_sph.N1//2:,:],mat_right[1:two_sph.N1//2,:]))
 		# print(mat_adjust[0][1])
-		Fy1y2 = ((irfft2(mat_adjust) / 8./ two_sph.y2**(two_sph.nu2-0.5)).T / two_sph.y1**(two_sph.nu1-0.5)).T
+		Fy1y2 = ((irfft2(mat_adjust).T / 8./ two_sph.y2**(two_sph.nu2-0.5)).T / two_sph.y1**(two_sph.nu1-0.5)).T # SS: added transpose operation for matrix irfft2(mat_adjust) 
 
 		return two_sph.y1[two_sph.N_extrap_high:two_sph.N1-two_sph.N_extrap_low], two_sph.y2[two_sph.N_extrap_high:two_sph.N2-two_sph.N_extrap_low], Fy1y2[two_sph.N_extrap_high:two_sph.N1-two_sph.N_extrap_low, two_sph.N_extrap_high:two_sph.N2-two_sph.N_extrap_low]
 
