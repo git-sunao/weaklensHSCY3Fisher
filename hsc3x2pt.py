@@ -36,6 +36,7 @@ H0 = 1e5 / constants.c.value # /(Mpc/h)
 deg2rad = np.pi/180.0
 arcmin2rad = 1/60.0 * deg2rad
 arcsec2rad = 1/60.0 * arcmin2rad
+rho_crit = 2.7753662724583075e11 # h^2 Msun/Mpc^3
 
 #################################################
 #
@@ -494,6 +495,7 @@ class galaxy_sample_source_class(galaxy_base_class):
         norm = simps(ius(zs, Pzs, ext=1)(z), z)
         chi_s = self.z2chi(z)
         chi_s_inv_ave = simps(ius(zs, Pzs, ext=1)(z+self.info['dzph']) * 1/chi_s, z)/norm # = <\chi_s^{-1}>
+        self.Pzs_norm = norm
         self.z_source_eff = self.chi2z(chi_s_inv_ave**-1)
         self.cosmo_dict = cosmo_dict
     
@@ -509,6 +511,36 @@ class galaxy_sample_source_class(galaxy_base_class):
     def get_shot_noise(self):
         v = super().get_shot_noise()
         return self.info['sigma_shape']**2*v
+    
+class galaxy_sample_source_IA_class(galaxy_sample_source_class):
+    info_keys = ['sample_name', 'Pzs_fname', 'dzph', 'dm', 'A_IA', 'eta_IA', 'sigma_shape', 'n2d']
+    sample_type = 'source'
+    z0 = 0.62 # IA hamana
+    C1 = 5e-14 # h^-2M_sun^-1 Mpc^3 hamana
+    def __init__(self, info):
+        super().__init__(info)
+        zs,Pzs = np.loadtxt(self.info['Pzs_fname'], unpack=True)
+        self.zs_max = max(zs)
+        z = np.linspace(min(zs), max(zs), 1000)
+        P = ius(zs, Pzs, ext=1)(z)
+        c = np.cumsum(P)/np.sum(P)
+        sel = c<0.05
+        self.zs005 = np.max(z[sel])
+        sel = c<0.95
+        self.zs095 = np.max(z[sel])
+        
+    def window_lensing_chirange_with_IA(self, r=0.01):
+        chi_source_max = self.z2chi(self.zs_max)
+        return np.array([r*chi_source_max, chi_source_max*(1-r)])
+        
+    def window_IA_chirange(self):
+        return self.z2chi(np.array([self.zs005, self.zs095]))
+    
+    def window_IA(self, chi, z, D_growth, Omega_m):
+        zs, Pzs = np.loadtxt(self.info['Pzs_fname'], unpack=True)
+        p = ius(zs, Pzs/self.Pzs_norm, ext=1)(z)
+        F = -self.info['A_IA']*self.C1*rho_crit*Omega_m/D_growth*((1+z)/(1+self.z0))**self.info['eta_IA']
+        return F*p
     
 class galaxy_sample_lens_class(galaxy_base_class):
     info_keys = ['sample_name', 'z_min', 'z_max', 'galaxy_bias', 'n2d', 'alpha_mag']
@@ -577,6 +609,7 @@ class pk2cl_class:
         self.cl_cache_sep = '-'
         self.chi_bin_lens_kernel = 50 # used to compute \int \diff\chi W_lensing(\chi)W_lensing(\chi)/\chi^2 P(l/\chi, z(\chi))
         self.chi_bin_galaxy_window = 20 # used to compute \int\diff\chi W_galaxy(\chi)W_X(\chi) /\chi^2 P(l/\chi, z(\chi))
+        self.chi_bin_IA = 25
         self.Cl_names_sep = ','
         
     def set_galaxy_sample(self, galaxy_sample):
@@ -708,19 +741,56 @@ class pk2cl_class:
         return ans
     
     def _CEE(self, sample1, sample2, l, model='nonlin', plot=False, plot_xlog=False):
-        # EE
+        ans = 0
         m1, m2 = 1.0+sample1.info['dm'], 1.0+sample2.info['dm']
+        # EE (GG)
         chi = get_chi_lensing( sample1.window_lensing_chirange(), sample2.window_lensing_chirange(), 
                               self.chi_bin_lens_kernel, l/self.k_peak/100.0)
         z = self.pk_class.get_z_from_chi(chi)
         plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
         w1, w2 = sample1.window_lensing(chi, z), sample2.window_lensing(chi, z)
-        ans = simps(w1*w2*plchi/chi**2, chi)*m1*m2
+        a = simps(w1*w2*plchi/chi**2, chi)*m1*m2
+        ans += a
+        # intrinsic alignment
+        # EE (GI)
+        if isinstance(sample1, galaxy_sample_source_IA_class):
+            chi, int_flag = get_chi_overlap( sample1.window_IA_chirange(), sample2.window_lensing_chirange_with_IA(), self.chi_bin_IA, return_int_flag=True)
+            if int_flag:
+                z = self.pk_class.get_z_from_chi(chi)
+                plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+                D_growth = self.pk_class.get_Dgrowth(z)
+                #print(z, int_flag, sample1.info['sample_name'], sample2.info['sample_name'])
+                Omega_m = 1.0 - self.cosmo_dict['Omega_de']
+                w1, w2 = sample1.window_IA(chi, z, D_growth, Omega_m), sample2.window_lensing(chi, z)
+                ans += simps(w1*w2*plchi/chi**2, chi)*m1*m2
+        # EE (IG)
+        if isinstance(sample2, galaxy_sample_source_IA_class):
+            chi, int_flag = get_chi_overlap( sample1.window_lensing_chirange_with_IA(), sample2.window_IA_chirange(), self.chi_bin_IA, return_int_flag=True)
+            if int_flag:
+                z = self.pk_class.get_z_from_chi(chi)
+                plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+                D_growth = self.pk_class.get_Dgrowth(z)
+                Omega_m = 1.0 - self.cosmo_dict['Omega_de']
+                w1, w2 = sample1.window_lensing(chi, z), sample2.window_IA(chi, z, D_growth, Omega_m)
+                ans += simps(w1*w2*plchi/chi**2, chi)*m1*m2
+        # EE (II)
+        if isinstance(sample1, galaxy_sample_source_IA_class) and isinstance(sample2, galaxy_sample_source_IA_class):
+            chi, int_flag = get_chi_overlap( sample1.window_IA_chirange(), sample2.window_IA_chirange(), self.chi_bin_IA, return_int_flag=True)
+            if int_flag:
+                z = self.pk_class.get_z_from_chi(chi)
+                plchi = self.pk_class.get_pkmm_lchi(l, chi, model)
+                D_growth = self.pk_class.get_Dgrowth(z)
+                Omega_m = 1.0 - self.cosmo_dict['Omega_de']
+                w1, w2 = sample1.window_IA(chi, z, D_growth, Omega_m), sample2.window_IA(chi, z, D_growth, Omega_m)
+                ans += simps(w1*w2*plchi/chi**2, chi)*m1*m2
+        
         if plot:
             plt.figure()
             plt.yscale('log')
             plt.xscale('log') if plot_xlog else None
             plt.plot(chi, w1*w2*plchi/chi**2)
+            
+        #print((ans-a)/ans)
         return ans
     
     def _logspace_l_array(self, min_max_bin_list):
@@ -1332,7 +1402,9 @@ names_labels_dict = {'omega_b':r'$\omega_\mathrm{b}$',
                      'dzph3':r'$\Delta z_\mathrm{ph,3}$', 
                      'dm3':r'$\Delta m_3$', 
                      'dzph4':r'$\Delta z_\mathrm{ph,4}$', 
-                     'dm4':r'$\Delta m_4$'}
+                     'dm4':r'$\Delta m_4$',
+                     'A_IA':r'$A_\mathrm{IA}$', 
+                     'eta_IA':r'$\eta_\mathrm{IA}$'}
 
 def getFisher(dirname, power, probes=['w', 'gamma_t', 'xi+', 'xi-'], label='', 
               Omega_s=None, probe_names_dict_to_skip=None):
