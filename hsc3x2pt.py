@@ -1446,7 +1446,7 @@ class Fisher_class:
         return self.joint(self, other, factor2=-1)
     
     def joint(self, fisher1, fisher2, factor1=1, factor2=1):
-        names_new = np.unique(fisher1.names + fisher2.names)
+        names_new = np.unique(list(fisher1.names) + list(fisher2.names))
         n_new = len(names_new)
         Fs = []
         centers = []
