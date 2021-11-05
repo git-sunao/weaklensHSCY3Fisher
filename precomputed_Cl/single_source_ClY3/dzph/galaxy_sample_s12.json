@@ -3,7 +3,7 @@
   "Pzs_fname": "sourcePzs_Y1/MLZs34.txt",
   "dzph": 0.01,
   "dm": 0.0,
-  "sigma_shape": 0.2,
+  "sigma_shape": 0.4,
   "n2d": "7.5 arcmin^-2",
   "sample_type": "source"
 }

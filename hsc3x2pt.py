@@ -537,8 +537,11 @@ class galaxy_sample_source_IA_class(galaxy_sample_source_class):
         return self.z2chi(np.array([self.zs005, self.zs095]))
     
     def window_IA(self, chi, z, D_growth, Omega_m):
+        # compute source distribution as a function of chi
         zs, Pzs = np.loadtxt(self.info['Pzs_fname'], unpack=True)
         p = ius(zs, Pzs/self.Pzs_norm, ext=1)(z)
+        norm = simps(p, chi)
+        p /= norm
         F = -self.info['A_IA']*self.C1*rho_crit*Omega_m/D_growth*((1+z)/(1+self.z0))**self.info['eta_IA']
         return F*p
     
@@ -939,7 +942,7 @@ class pk2cl_class:
         self.set_Omega_s(Omega_s_dict)
         
         
-    def get_lCl_from_cache(self, name1, name2, include_shot_noise=False):
+    def get_lCl_from_cache(self, name1, name2, include_shot_noise=False, shot_noise_factor=1.0):
         l = copy.deepcopy(self.Cl_cache['Cl']['l'])
         Cl = copy.deepcopy(self.Cl_cache['Cl'][ self.Cl_names_sep.join([name1, name2]) ])
         
@@ -951,7 +954,7 @@ class pk2cl_class:
         # shot noise term
         if include_shot_noise and name1 == name2:
             sample = self.galaxy_sample_dict[name1]
-            shot_noise = sample.get_shot_noise()
+            shot_noise = sample.get_shot_noise() * shot_noise_factor
             Cl += shot_noise
         return l, Cl
         
@@ -1010,11 +1013,14 @@ class pk2cl_class:
     def _get_lClCl(self, names1, probe1, names2, probe2, include_shot_noise=True):
         ClCl = 0
         if probe1 == probe2 or (probe1=='xi+' and probe2=='xi-') or (probe1=='xi-' and probe2=='xi+'):
-            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=include_shot_noise)
-            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=include_shot_noise)
+            shot_noise_factor = 1
+            if 'xi' in probe1 and 'xi' in probe2:
+                shot_noise_factor = 0.5
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[0], include_shot_noise=include_shot_noise, shot_noise_factor=shot_noise_factor)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[1], include_shot_noise=include_shot_noise, shot_noise_factor=shot_noise_factor)
             ClCl += Cl1*Cl2
-            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[1], include_shot_noise=include_shot_noise)
-            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[0], include_shot_noise=include_shot_noise)
+            l, Cl1 = self.get_lCl_from_cache(names1[0], names2[1], include_shot_noise=include_shot_noise, shot_noise_factor=shot_noise_factor)
+            l, Cl2 = self.get_lCl_from_cache(names1[1], names2[0], include_shot_noise=include_shot_noise, shot_noise_factor=shot_noise_factor)
             ClCl += Cl1*Cl2
         return l, ClCl
     
