@@ -1,0 +1,11 @@
+{
+  "sample_name": "s2",
+  "Pzs_fname": "sourcePzs_Y1/MLZs2.txt",
+  "dzph": 0.0,
+  "dm": 0.0,
+  "A_IA": 0.00101,
+  "eta_IA": 3.0,
+  "sigma_shape": 0.4,
+  "n2d": "5.5 arcmin^-2",
+  "sample_type": "source"
+}
