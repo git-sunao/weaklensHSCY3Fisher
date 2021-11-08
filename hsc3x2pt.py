@@ -30,6 +30,7 @@ from twobessel import two_Bessel
 from twobessel import log_extrap
 from astropy import constants
 from pandas import DataFrame
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 #H0 = 100 / constants.c.value *1e6 # / (Mpc/h)
 H0 = 1e5 / constants.c.value # /(Mpc/h)
@@ -1764,6 +1765,64 @@ class Fisher_class:
         for name in self.names:
             s = self.get1DSigma(name)
             print(name.ljust(maxlen+1)+' -- '+f'{s}')
+            
+            
+    def get_correlation_coefficients(self):
+        cov = np.linalg.inv(self.F)
+        v = np.diag(cov)
+        v1, v2 = np.meshgrid(v,v)
+        cc = cov/(v1*v2)**0.5
+        return cc
+    
+    def get_variance(self):
+        cov = np.linalg.inv(self.F)
+        v = np.diag(cov)
+        return v
+            
+    def plot_correlation_coefficients(self, figsize=(7,7), cmap='Blues'):
+        cc = self.get_correlation_coefficients()
+        v = self.get_variance()
+        labels = self.labels
+        n = len(self.names)
+        x = y = np.arange(0, n, 1)
+
+        fig = plt.figure(figsize=figsize)
+
+        ax = plt.subplot(111)
+        im = ax.imshow(cc, vmin=-1, vmax=1, cmap=cmap)
+
+        #ax = plt.gca();
+
+        # Major ticks
+        ax.set_xticks(x)
+        ax.set_yticks(x)
+
+        # Labels for major ticks
+        ax.set_xticklabels(labels, rotation=90)
+        ax.set_yticklabels(labels)
+        
+        ax.set_xticks(np.arange(-0.5, n, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, n, 1), minor=True)
+
+        ax.grid(which='minor', color='k', linestyle='-', linewidth=1.5)
+
+        divider = make_axes_locatable(ax)
+        ax2 = divider.append_axes('top', size='40%', pad=0.08)
+        cax = divider.append_axes('right', size='5%', pad=0.08)
+        cb = plt.colorbar( im, ax=ax, cax=cax )
+
+        ax2.set_yscale('log')
+        ax2.bar(x, v, width=1, edgecolor='k')
+        ax2.set_ylabel(r'V = [Diagonal]${}^{1/2}$')
+        ax2.set_xticks(x)
+        ax2.set_xlim(ax.get_xlim())
+        ax2.set_xticks(np.arange(-0.5, n, 1), minor=True)
+        plt.setp(ax2.get_xticklabels(), visible=False, color='C1')
+
+        plt.show()
+        return fig
+        
+        
             
 def compare1Sigma(fishers, names=None, sigma_scale=1):
     if not isinstance(fishers, list):
