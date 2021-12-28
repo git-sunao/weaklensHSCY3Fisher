@@ -593,6 +593,48 @@ class galaxy_sample_lens_class(galaxy_base_class):
     def get_Delta_chi_g(self):
         return self.get_Delta_chi()
     
+class galaxy_sample_source_class_broad_Nz(galaxy_base_class):
+    info_keys = ['sample_name', 'Pzs_fname', 'dzph', 'dm', 'sigma_shape', 'n2d']
+    sample_type = 'source'
+    def __init__(self, info):
+        super().__init__(info)
+        
+    def set_cosmology_from_dict(self, cosmo_dict):
+        super().set_cosmology_from_dict(cosmo_dict)
+        # chi_s
+        # 
+        # \int{\rm d}z_l P(z_l) \chi (\chi_s-\chi)/\chi_s = \chi (1 - \chi <\chi_s^{-1}> )
+        #
+        # where <\chi_s^{-1}> = \int{\rm d}z_s P(z_s) \chi_s^{-1}.
+        #
+        # We define z_source_eff as 
+        #
+        #  \chi(z_source_eff) = <\chi_s^{-1}>^{-1}
+        self.zs, Pzs = np.loadtxt(self.info['Pzs_fname'], unpack=True) # this file must contain equally spaced zs.
+        norm = np.sum(Pzs)
+        self.Pzs_cumsum = (np.cumsum(Pzs[::-1])/norm)[::-1]
+        self.chis = self.z2chi(self.zs)
+        self.Pzs_ov_chizs_cumsum = (np.cumsum((Pzs/self.chis)[::-1])/norm)[::-1]
+        self.z_source_eff = max(self.zs)
+        self.cosmo_dict = cosmo_dict
+    
+    def window_lensing(self, chi, z):
+        ans = np.zeros(chi.shape)
+        sel = np.logical_and(0<z, z < max(self.zs))
+        Omega_m = 1.0 - self.cosmo_dict['Omega_de']
+        
+        f1 = interp1d(self.chis, self.Pzs_cumsum, bounds_error=False, fill_value=(self.Pzs_cumsum[0], 0))(chi[sel])
+        f2 = interp1d(self.chis, self.Pzs_ov_chizs_cumsum, bounds_error=False, fill_value=(self.Pzs_ov_chizs_cumsum[0], 0))(chi[sel])
+        kernel = chi[sel]*f1 - chi[sel]**2*f2
+        
+        ans[sel] = 3.0/2.0 * H0**2 * Omega_m * (1+z[sel]) * kernel
+        
+        return ans
+    
+    def window_lensing_chirange(self):
+        chi_max = self.z2chi(max(self.zs))
+        return np.array([chi_max*0.01, 0.99*chi_max])
+    
 
 #######################################
 #
@@ -792,7 +834,12 @@ class pk2cl_class:
             plt.figure()
             plt.yscale('log')
             plt.xscale('log') if plot_xlog else None
-            plt.plot(chi, w1*w2*plchi/chi**2)
+            plt.plot(chi, w1*w2*plchi/chi**2, label='integrand')
+            ymax = plt.ylim()[1]
+            plt.plot(chi, w1/max(w1)*ymax, label='window1')
+            plt.plot(chi, w2/max(w2)*ymax, label='window2')
+            plt.plot(chi, plchi/chi**2/max(plchi/chi**2)*ymax, label='P(k=l/chi, z)/chi**2')
+            plt.legend()
             
         #print((ans-a)/ans)
         return ans
@@ -1694,7 +1741,7 @@ class Fisher_class:
                 self.order = ['Omega_de', 'S8']
             
             def set_density(self):
-                self.x = np.linspace(self.mu[0]-5*self.sigmas[0], np.min([self.mu[0]+5*self.sigmas[0], 1.0-1e-3]), self.ngrid)
+                self.x = np.linspace(np.max([1e-3, self.mu[0]-5*self.sigmas[0]]), np.min([self.mu[0]+5*self.sigmas[0], 1.0-1e-3]), self.ngrid)
                 self.y = np.linspace(self.mu[1]-5*self.sigmas[1], self.mu[1]+5*self.sigmas[1], self.ngrid)
                 X, Y = np.meshgrid(self.x, self.y)
                 dX, dY = X-self.mu[0], Y*((1.0-X)/0.3)**-self.alpha - self.mu_sigma8
@@ -1729,7 +1776,7 @@ class Fisher_class:
             
             def set_density(self):
                 self.x = np.linspace(max([self.mu[0]-5*self.sigmas[0],1e-3]), self.mu[0]+5*self.sigmas[0], self.ngrid) # sigma8
-                self.y = np.linspace(self.mu[1]-5*self.sigmas[0], self.mu[1]+5*self.sigmas[0], self.ngrid) # S8
+                self.y = np.linspace(max([self.mu[1]-5*self.sigmas[0],1e-3]), self.mu[1]+5*self.sigmas[0], self.ngrid) # S8
                 X, Y = np.meshgrid(self.x, self.y)
                 dX, dY = X-self.mu[0], 1.0 - 0.3*(Y/X)**(1/self.alpha) - self.mu_Omega_de
                 chi2 = dX**2*self.mF[0,0] + 2*dX*dY*self.mF[0,1] + dY**2*self.mF[1,1]
